@@ -27,7 +27,8 @@ object Constants {
     /**
      * 节目单XML地址
      */
-    const val EPG_XML_URL = "https://epg.136605.xyz/3days.xml.gz"
+    // ysp-live 自带节目单（其 M3U 的 url-tvg 默认指向该源，覆盖央视/卫视等国内频道）
+    const val EPG_XML_URL = "https://epg.zsdc.eu.org/t.xml.gz"
 
     /**
      * 节目单刷新时间阈值（小时）

@@ -31,7 +31,10 @@ data class EpgProgramme(
         /**
          * 节目进度
          */
-        fun EpgProgramme.progress() =
-            (System.currentTimeMillis() - startAt).toFloat() / (endAt - startAt)
+        fun EpgProgramme.progress(): Float {
+            val span = endAt - startAt
+            if (span <= 0) return 0f
+            return ((System.currentTimeMillis() - startAt).toFloat() / span).coerceIn(0f, 1f)
+        }
     }
 }

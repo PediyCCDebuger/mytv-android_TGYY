@@ -2210,9 +2210,9 @@ def _ck_guard (ts ,guid ):
     enc =_tea_pkt (plain ,_CK_GTEA )+struct .pack ('>I',_cksum (plain ))
     enc =bytes ((a ^_CK_GXOR [i &7 ]for i ,a in enumerate (enc )))
     return enc .hex ().upper ()
-def _ckey (channel_id ):
+def _ckey (channel_id ,guid =None ):
     ts =int (time .time ())
-    guid =os .urandom (16 ).hex ()
+    guid =guid or os .urandom (16 ).hex ()
     guard =_ck_guard (ts ,guid )
     uid =os .urandom (4 ).hex ().upper ()
     body =bytes .fromhex ('0000004200000004000004d2')+struct .pack ('>I',_CK_PLATFORM )+struct .pack ('>I',0 )+struct .pack ('>I',ts )+_lp ('dcgh')+_lp ('_zj1A5Gh6QYcxWjIUGos2w==')+_lp (_CK_APPVER )+_lp (str (channel_id ))+_lp (guid )+struct .pack ('>I',1 )+struct .pack ('>I',1 )+_lp (uid )+_lp ('nil')+_lp ('57eab0c4-2c58-44c6-8ae9-dd2757525dc5')+_lp ('nil')+_lp ('v0.1.000')+_lp ('com.cctv.yangshipin.app.iphone')+_lp (str (_CK_PLATFORM ))+_lp ('ex_json_bus')+_lp ('ex_json_vs')+_lp (guard )
@@ -2224,8 +2224,8 @@ def _ckey (channel_id ):
     b64 =base64 .b64encode (enc ).decode ().replace ('+','_').replace ('/','-').rstrip ('=')
     return {'cKey':'--01'+b64 ,'guid':guid ,'ts':ts ,'flowId':'%s_%d'%(uuid .uuid4 ().hex .upper (),_CK_PLATFORM )}
 _BK_H264 =base64 .b64encode (b'H(30:1080,60:1080|30:1080,60:1080)').decode ()
-def bk_playurls (channel_id ,live_pid ,defn ='fhd'):
-    t =_ckey (channel_id )
+def bk_playurls (channel_id ,live_pid ,defn ='fhd' ,guid =None ):
+    t =_ckey (channel_id ,guid )
     q =urllib .parse .urlencode ({'atime':'120','livepid':live_pid ,'cnlid':channel_id ,'appVer':_CK_APPVER ,'app_version':'300090','caplv':'1','cmd':'2','defn':defn ,'device':'iPhone','encryptVer':'4.2','getpreviewinfo':'0','hevclv':'0','lang':'zh-Hans_CN','livequeue':'0','logintype':'1','nettype':'1','newnettype':'1','newplatform':str (_CK_PLATFORM ),'platform':str (_CK_PLATFORM ),'sdtfrom':'v3021','spacode':'23','spaudio':'1','spdemuxer':'6','spdrm':'2','spdynamicrange':'1','spflv':'1','spflvaudio':'1','sphdrfps':'60','sphttps':'1','spvcode':_BK_H264 ,'spvideo':'4','stream':'1','system':'1','sysver':'ios18.2.1','uhd_flag':'0','cKey':t ['cKey'],'guid':t ['guid'],'fntick':str (t ['ts']),'flowid':t ['flowId'],'playbacktime':'0'})
     req =urllib .request .Request ('https://bkliveinfo.ysp.cctv.cn/?'+q ,headers ={'User-Agent':'qqlive','Accept':'application/json'})
     with urllib .request .urlopen (req ,timeout =5 )as r :
@@ -2494,7 +2494,7 @@ class ApiFlowLimiter :
             if diff <target_delay :
                 time .sleep (target_delay -diff )
             self .last_call =time .time ()
-global_flow_limiter =ApiFlowLimiter ()
+global_flow_limiter =ApiFlowLimiter (min_interval_ms =500 ,jitter_ms =200 )
 class TsSegmentCache :
     def __init__ (self ,max_mb :int =100 ,max_age_sec :int =180 ):
         self .max_bytes =max_mb *1024 *1024 
@@ -2584,6 +2584,8 @@ class Channel :
         self .thread =None 
         self .last_error =''
         self .last_ok =0.0 
+        # 每个频道复用同一个设备身份(guid)，避免切台时后端按 guid 杀掉上一个频道的流（表现为“一个能播另一个就 2004”的交替现象）
+        self .guid =os .urandom (16 ).hex ()
         self .mode ='bk'if (not slug .startswith ('cctv')and not slug .startswith ('cgtn'))else 'jce'
         self .last_pdt =''
         self .bk_urls =[]
@@ -2666,9 +2668,9 @@ def bk_refresh (ch ):
     global_flow_limiter .wait_slot ()
     now =time .time ()
     if now -ch .bk_urls_time >BK_URL_TTL or not ch .bk_urls :
-        ch .bk_urls =bk_playurls (ch .sid ,ch .pid ,ch .defn )
-        ch .bk_urls_time =now 
-        log (f'[{ch .slug }] bkliveinfo 备用通道就绪 ({len (ch .bk_urls )} 地址)',min_interval =60.0 )
+        ch .bk_urls =bk_playurls (ch .sid ,ch .pid ,ch .defn ,ch .guid )
+    ch .bk_urls_time =now 
+    log (f'[{ch .slug }] bkliveinfo 备用通道就绪 ({len (ch .bk_urls )} 地址)',min_interval =60.0 )
     last_err =''
     for attempt in range (2 ):
         for u in ch .bk_urls :
@@ -2687,7 +2689,7 @@ def bk_refresh (ch ):
                 last_err ='%s: %s'%(type (e ).__name__ ,e )
         if attempt ==0 :
             try :
-                ch .bk_urls =bk_playurls (ch .sid ,ch .pid ,ch .defn )
+                ch .bk_urls =bk_playurls (ch .sid ,ch .pid ,ch .defn ,ch .guid )
                 ch .bk_urls_time =time .time ()
                 log (f'[{ch .slug }] {defn_label (ch .defn )} 地址已过期，已重新拉取',min_interval =10.0 )
             except Exception :
@@ -3191,6 +3193,13 @@ class Handler (BaseHTTPRequestHandler ):
                 return 
             ensure_channel (ch )
             pl =build_playlist (ch ,holdback =True )
+            if not (pl and '#EXTM3U'in pl ):
+                # 后端瞬时失败重试一次，缓解切台/冷启动时偶发的 2004
+                try :
+                    coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =6.0 )
+                except Exception :
+                    pass 
+                pl =build_playlist (ch ,holdback =True )
             if pl and '#EXTM3U'in pl :
                 with ch .lock :
                     prev_src =getattr (ch ,'last_m3u8_source',None )
