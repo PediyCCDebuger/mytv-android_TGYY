@@ -31,7 +31,17 @@ android {
         }
 
         ndk {
-            abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a", "x86_64"))
+            abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a"))
+        }
+
+        // 产出分架构 APK（32 位 / 64 位），便于电视与手机分别测试
+        splits {
+            abi {
+                isEnable = true
+                reset()
+                include("armeabi-v7a", "arm64-v8a")
+                isUniversalApk = true
+            }
         }
     }
 
