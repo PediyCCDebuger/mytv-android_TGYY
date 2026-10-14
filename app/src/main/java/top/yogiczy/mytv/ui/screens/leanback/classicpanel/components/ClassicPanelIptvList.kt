@@ -166,7 +166,7 @@ private fun LeanbackClassicPanelIptvItem(
     // 用“分钟桶”作为记忆键：避免每次重组都扫描 EPG（解决打开/滚动卡顿），
     // 同时每分钟刷新一次“正在播放”，兼顾流畅与实时
     val minuteBucket = System.currentTimeMillis() / 60_000L
-    val currentProgramme = remember(epgListProvider(), iptv, minuteBucket) {
+    val currentProgramme = remember(iptv, minuteBucket) {
         epgProgrammeCurrentProvider()?.now
     }
 
