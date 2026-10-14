@@ -2960,10 +2960,18 @@ class Handler (BaseHTTPRequestHandler ):
                     continue 
                 if only_4k and (slug not in TRUE_4K_CHANNELS ):
                     continue 
-                attrs =f' tvg-id="{tid }" tvg-name="{name }" tvg-logo="{logo }" group-title="{grp }"'
+                # 央视名称去掉连字符并去掉尾部描述，匹配 EPG 源(CCTV14 等)，
+                # 否则 tvg-name 带 “CCTV-14 少儿” 无法与 EPG 的 “CCTV14” 匹配，导致看不到央视节目单
+                disp_name =name 
+                if name .upper ().startswith ('CCTV'):
+                    _n =name .replace ('CCTV-','CCTV',1 ).replace ('cctv-','cctv',1 )
+                    _n =_n .split (' ')[0 ]
+                    if _n :
+                        disp_name =_n 
+                attrs =f' tvg-id="{tid }" tvg-name="{disp_name }" tvg-logo="{logo }" group-title="{grp }"'
                 if slug in TIMESHIFT_SUPPORTED :
                     attrs +=' catchup="append" catchup-days="7" catchup-source="?playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}"'
-                lines .append (f'#EXTINF:-1{attrs },{name }')
+                lines .append (f'#EXTINF:-1{attrs },{disp_name }')
                 lines .append (f'{proto }://{host }/{slug }.m3u8')
             self ._send (200 ,'\n'.join (lines )+'\n','application/vnd.apple.mpegurl',head_only =head_only )
             return 
@@ -3200,6 +3208,38 @@ class Handler (BaseHTTPRequestHandler ):
                 except Exception :
                     pass 
                 pl =build_playlist (ch ,holdback =True )
+            # bk 仍失败时，对央视频道尝试 jce(时移) 备用通道：部分网络/地区 bkliveinfo 不可达，
+            # 而 CCTV 原生时移 API 走不同 CDN，可能可用（如 CCTV14 偶发 2004 的兜底）
+            if (not (pl and '#EXTM3U'in pl ))and ch and (ch .slug .startswith ('cctv')or ch .slug .startswith ('cgtn'))and ch .mode =='bk':
+                try :
+                    _saved =ch .mode 
+                    ch .mode ='jce'
+                    coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =6.0 )
+                    pl =build_playlist (ch ,holdback =True )
+                    if pl and '#EXTM3U'in pl :
+                        log (f'[{ch .slug }] bk 不可用，已切到 jce 时移备用通道',min_interval =30.0 )
+                    else :
+                        ch .mode =_saved 
+                except Exception :
+                    ch .mode =_saved 
+            # 仍失败则尝试降清晰度备用：部分网络某频道的 fhd CDN 不可达，但 shd/hd/sd 可用
+            # （如 CCTV14 偶发 2004 的二次兜底；降级成功也恢复默认清晰度，避免影响后续逻辑）
+            if not (pl and '#EXTM3U'in pl ):
+                _defn_saved =ch .defn 
+                try :
+                    for _d in ('shd','hd','sd'):
+                        if _d ==_defn_saved :
+                            continue 
+                        ch .defn =_d 
+                        coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =6.0 )
+                        pl =build_playlist (ch ,holdback =True )
+                        if pl and '#EXTM3U'in pl :
+                            log (f'[{ch .slug }] 默认清晰度不可用，已降级到 {_d }',min_interval =30.0 )
+                            break 
+                except Exception :
+                    pass 
+                finally :
+                    ch .defn =_defn_saved 
             if pl and '#EXTM3U'in pl :
                 with ch .lock :
                     prev_src =getattr (ch ,'last_m3u8_source',None )

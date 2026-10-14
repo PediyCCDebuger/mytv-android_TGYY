@@ -31,6 +31,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.tv.foundation.lazy.list.TvLazyColumn
@@ -162,7 +163,12 @@ private fun LeanbackClassicPanelIptvItem(
 ) {
     val iptv = iptvProvider()
     val focusRequester = focusRequesterProvider()
-    val currentProgramme = epgProgrammeCurrentProvider()?.now
+    // 用“分钟桶”作为记忆键：避免每次重组都扫描 EPG（解决打开/滚动卡顿），
+    // 同时每分钟刷新一次“正在播放”，兼顾流畅与实时
+    val minuteBucket = System.currentTimeMillis() / 60_000L
+    val currentProgramme = remember(epgListProvider(), iptv, minuteBucket) {
+        epgProgrammeCurrentProvider()?.now
+    }
 
     var isFocused by remember { mutableStateOf(false) }
 
@@ -182,6 +188,7 @@ private fun LeanbackClassicPanelIptvItem(
         ) {
             androidx.tv.material3.ListItem(
                 modifier = modifier
+                    .height(64.dp)
                     .focusRequester(focusRequester)
                     .onFocusChanged {
                         isFocused = it.isFocused || it.hasFocus
@@ -210,7 +217,11 @@ private fun LeanbackClassicPanelIptvItem(
                 selected = isSelectedProvider(),
                 onClick = { },
                 headlineContent = {
-                    Text(text = iptv.name, maxLines = 2)
+                    Text(
+                        text = iptv.name,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 },
                 supportingContent = {
                     Text(

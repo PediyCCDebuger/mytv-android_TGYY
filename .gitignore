@@ -20,3 +20,6 @@
 .cxx
 local.properties
 key.properties
+# Python cache
+__pycache__/
+*.pyc
