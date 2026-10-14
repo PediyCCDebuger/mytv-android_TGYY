@@ -2584,7 +2584,7 @@ class Channel :
         self .thread =None 
         self .last_error =''
         self .last_ok =0.0 
-        self .mode ='jce'
+        self .mode ='bk'if (not slug .startswith ('cctv')and not slug .startswith ('cgtn'))else 'jce'
         self .last_pdt =''
         self .bk_urls =[]
         self .bk_urls_time =0.0 
@@ -2702,7 +2702,7 @@ def refresh_once (ch ):
         else :
             try :
                 ok =jce_refresh (ch )
-            except DeadHostError :
+            except Exception :
                 ch .mode ='bk'
                 log (f'[{ch .slug }] JCE 域名受限，自动切换 bkliveinfo 备用通道',min_interval =10.0 )
                 ok =bk_refresh (ch )

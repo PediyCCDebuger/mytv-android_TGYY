@@ -14,7 +14,9 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.tv.foundation.lazy.list.TvLazyColumn
 import androidx.tv.foundation.lazy.list.items
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -40,47 +42,48 @@ fun LeanbackSettingsCategoryYspLog(
 
     val client = remember {
         OkHttpClient.Builder()
-            .connectTimeout(3, TimeUnit.SECONDS)
-            .readTimeout(3, TimeUnit.SECONDS)
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.SECONDS)
             .build()
     }
 
     LaunchedEffect(Unit) {
         while (true) {
             try {
-                val request = Request.Builder().url(YSP_LOG_URL).build()
-                client.newCall(request).execute().use { response ->
-                    if (response.isSuccessful) {
-                        val body = response.body?.string() ?: ""
-                        val json = JSONObject(body)
-                        val count = json.optInt("count", 0)
-                        val uptime = json.optInt("uptime_sec", 0)
-                        val engineReady = json.optBoolean("engine_ready", false)
-                        val arr: JSONArray = json.optJSONArray("lines") ?: JSONArray()
-                        val list = mutableListOf<String>()
-                        for (i in 0 until arr.length()) {
-                            list.add(arr.optString(i))
+                val bodyText = withContext(Dispatchers.IO) {
+                    val request = Request.Builder().url(YSP_LOG_URL).build()
+                    client.newCall(request).execute().use { response ->
+                        if (response.isSuccessful) {
+                            response.body?.string() ?: ""
+                        } else {
+                            throw java.io.IOException("HTTP ${response.code}")
                         }
-                        lines = list
-                        connected = true
-                        status = buildString {
-                            append("已连接 · 共 $count 条日志 · 运行 ${uptime}s")
-                            append(
-                                if (engineReady) {
-                                    " · 引擎就绪"
-                                } else {
-                                    " · 移动端模式(4K自动回退1080p)"
-                                }
-                            )
-                        }
-                    } else {
-                        connected = false
-                        status = "ysp-live 服务返回错误：${response.code}"
                     }
                 }
-            } catch (_: Exception) {
+                val json = JSONObject(bodyText)
+                val count = json.optInt("count", 0)
+                val uptime = json.optInt("uptime_sec", 0)
+                val engineReady = json.optBoolean("engine_ready", false)
+                val arr: JSONArray = json.optJSONArray("lines") ?: JSONArray()
+                val list = mutableListOf<String>()
+                for (i in 0 until arr.length()) {
+                    list.add(arr.optString(i))
+                }
+                lines = list
+                connected = true
+                status = buildString {
+                    append("已连接 · 共 $count 条日志 · 运行 ${uptime}s")
+                    append(
+                        if (engineReady) {
+                            " · 引擎就绪"
+                        } else {
+                            " · 移动端模式(4K自动回退1080p)"
+                        }
+                    )
+                }
+            } catch (e: Exception) {
                 connected = false
-                status = "无法连接 ysp-live 本机服务（127.0.0.1:8767）。请确认应用已正常启动，或在“直播源”中改用其他订阅源。"
+                status = "无法连接 ysp-live 本机服务（127.0.0.1:8767）：${e.message ?: e.javaClass.simpleName}。请确认应用已正常启动，或在“直播源”中改用其他订阅源。"
             }
             delay(2000)
         }
