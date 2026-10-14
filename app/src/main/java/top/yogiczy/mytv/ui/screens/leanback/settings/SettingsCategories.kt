@@ -13,7 +13,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Update
-import androidx.compose.material.icons.extended.RssFeed
+import androidx.compose.material.icons.filled.RssFeed
 import androidx.compose.ui.graphics.vector.ImageVector
 
 enum class LeanbackSettingsCategories(
@@ -31,6 +31,6 @@ enum class LeanbackSettingsCategories(
     HTTP(Icons.Default.Http, "网络"),
     DEBUG(Icons.Default.BugReport, "调试"),
     LOG(Icons.Default.FormatListNumbered, "日志"),
-    YSP_LOG(RssFeed, "ysp-live日志"),
+    YSP_LOG(Icons.Default.RssFeed, "ysp-live日志"),
     MORE(Icons.Default.MoreHoriz, "更多设置"),
 }
