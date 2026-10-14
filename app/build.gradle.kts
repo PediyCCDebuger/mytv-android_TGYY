@@ -6,6 +6,7 @@ plugins {
     alias(libs.plugins.jetbrains.kotlin.android)
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.kotlin.serialization)
+    id("com.chaquo.python") version "15.0.1"
 }
 
 val keystorePropertiesFile = rootProject.file("key.properties")
@@ -130,4 +131,11 @@ dependencies {
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
+}
+
+chaquopy {
+    defaultConfig {
+        // ysp-live 仅依赖 Python 标准库，无需安装第三方 pip 包
+        version = "3.11"
+    }
 }

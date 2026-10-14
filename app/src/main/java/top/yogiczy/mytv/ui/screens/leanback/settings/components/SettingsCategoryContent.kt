@@ -37,6 +37,7 @@ fun LeanbackSettingsCategoryContent(
             LeanbackSettingsCategories.LOG -> LeanbackSettingsCategoryLog(
                 history = Logger.history,
             )
+            LeanbackSettingsCategories.YSP_LOG -> LeanbackSettingsCategoryYspLog()
             LeanbackSettingsCategories.MORE -> LeanbackSettingsCategoryMore()
         }
     }

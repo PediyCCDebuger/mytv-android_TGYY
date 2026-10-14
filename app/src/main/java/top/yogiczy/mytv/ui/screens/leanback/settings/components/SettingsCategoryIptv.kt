@@ -223,7 +223,7 @@ private fun LeanbackSettingsIptvSourceHistoryDialog(
                             onClick = { },
                             headlineContent = {
                                 androidx.tv.material3.Text(
-                                    text = if (source == Constants.IPTV_SOURCE_URL) "默认直播源（网络需要支持ipv6）" else source,
+                                    text = if (source == Constants.IPTV_SOURCE_URL) "内置 ysp-live 本机直播源（央视/卫视，需应用后台服务运行）" else source,
                                     modifier = Modifier.fillMaxWidth(),
                                     maxLines = if (isFocused) Int.MAX_VALUE else 2,
                                 )
