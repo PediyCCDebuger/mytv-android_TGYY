@@ -23,11 +23,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # GitHub  runners 已预装 Android SDK；无需 setup-android（该 action 会尝试安装已废弃的 "tools" 包而失败）
+      # GitHub runners 已预装 Android SDK 于 /usr/local/lib/android/sdk；无需 setup-android（该 action 会尝试安装已废弃的 "tools" 包而失败）
       - name: Set up Android SDK (accept licenses + install platform/build-tools)
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
         run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           echo "ANDROID_HOME=$ANDROID_HOME"
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager "platforms;android-34" "build-tools;34.0.0"
