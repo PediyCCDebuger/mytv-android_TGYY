@@ -3273,7 +3273,7 @@ class Handler (BaseHTTPRequestHandler ):
             with ch .lock :
                 cached_pl =ch .last_built_playlist 
                 cached_age =now_ts -ch .last_built_time 
-            if cached_pl and cached_age <15.0 and ('#EXTM3U'in cached_pl ):
+            if cached_pl and cached_age <60.0 and ('#EXTM3U'in cached_pl ):
                 with ch .lock :
                     prev_src =getattr (ch ,'last_m3u8_source',None )
                     ch .last_m3u8_source ='bk'
@@ -3286,20 +3286,37 @@ class Handler (BaseHTTPRequestHandler ):
             ensure_channel (ch )
             pl =build_playlist (ch ,holdback =True )
             if not (pl and '#EXTM3U'in pl ):
-                # 冷启动/切台首次请求时同步等待刷新完成（最长 10s），避免直接 503/2004；
+                # 冷启动/切台首次请求时同步等待刷新完成（最长 8s），避免直接 503/2004；
                 # ensure_channel 已发起刷新，这里等待同一在途刷新收尾
                 try :
-                    coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =10.0 )
+                    coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =3.0 )
                 except Exception :
                     pass 
                 pl =build_playlist (ch ,holdback =True )
+            # 切台/冷启动常见场景：该频道曾在 5 分钟内播放过、存在可用的陈旧播放列表。
+            # 与其继续走 jce/降清晰度等耗时兜底(最坏约 25s, 易触发播放器 10003 加载超时)，
+            # 不如先直接返回上一次播放列表(分片签名通常仍有效)，让画面先起来；
+            # 后台刷新恢复后下一次轮询自然轮换到最新切片。
+            if not (pl and '#EXTM3U'in pl ):
+                with ch .lock :
+                    stale_pl =ch .last_built_playlist 
+                    stale_age =time .time ()-ch .last_built_time 
+                if stale_pl and '#EXTM3U'in stale_pl and stale_age <300.0 :
+                    log (f'[{ch .slug }] 刷新暂未就绪，先沿用上次播放列表(已用 {stale_age :.0f }s)',min_interval =10.0 )
+                    with ch .lock :
+                        prev_src =getattr (ch ,'last_m3u8_source',None )
+                        ch .last_m3u8_source ='bk'
+                    if prev_src =='device':
+                        stale_pl =stale_pl .replace ('#EXTM3U','#EXTM3U\n#EXT-X-DISCONTINUITY',1 )
+                    self ._send (200 ,stale_pl ,'application/vnd.apple.mpegurl',head_only =head_only )
+                    return 
             # bk 仍失败时，对央视频道尝试 jce(时移) 备用通道：部分网络/地区 bkliveinfo 不可达，
             # 而 CCTV 原生时移 API 走不同 CDN，可能可用（如 CCTV14 偶发 2004 的兜底）
             if (not (pl and '#EXTM3U'in pl ))and ch and (ch .slug .startswith ('cctv')or ch .slug .startswith ('cgtn'))and ch .mode =='bk':
                 try :
                     _saved =ch .mode 
                     ch .mode ='jce'
-                    coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =6.0 )
+                    coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =3.0 )
                     pl =build_playlist (ch ,holdback =True )
                     if pl and '#EXTM3U'in pl :
                         log (f'[{ch .slug }] bk 不可用，已切到 jce 时移备用通道',min_interval =30.0 )
@@ -3316,7 +3333,7 @@ class Handler (BaseHTTPRequestHandler ):
                         if _d ==_defn_saved :
                             continue 
                         ch .defn =_d 
-                        coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =6.0 )
+                        coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =3.0 )
                         pl =build_playlist (ch ,holdback =True )
                         if pl and '#EXTM3U'in pl :
                             log (f'[{ch .slug }] 默认清晰度不可用，已降级到 {_d }',min_interval =30.0 )
@@ -3548,7 +3565,7 @@ def warmup_all_channels ():
                 ensure_channel (ch )
             except Exception :
                 pass 
-            time .sleep (0.15 )
+            time .sleep (0.05 )
         log ('[系统] 启动预热：已发起全部频道首次刷新')
     threading .Thread (target =_run ,daemon =True ,name ='warmup').start ()
 def start_server (port =8767 ,bind ='127.0.0.1',no_4k =True ,no_engine =True ,engine_port =8787 ,cache_mb =64 ,links_per_device =6 ,zap_debounce =10.0 ,timeout =10.0 ,data_dir =''):
