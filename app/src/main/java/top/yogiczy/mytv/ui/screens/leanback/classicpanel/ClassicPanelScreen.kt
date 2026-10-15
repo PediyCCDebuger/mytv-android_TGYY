@@ -153,6 +153,12 @@ private fun LeanbackClassicPanelScreenContent(
     var focusedIptv by remember { mutableStateOf(currentIptvProvider()) }
     var focusedIptvFocusRequester by remember { mutableStateOf(FocusRequester.Default) }
 
+    // 全局频道编号（扁平总列表序号），与“数字选台”(iptvGroupList.iptvList[N-1]) 保持一致，
+    // 这样列表里显示的数字即为遥控器数字键可直达的频道号
+    val channelNoMap = remember {
+        iptvGroupListProvider().iptvList.mapIndexed { index, iptv -> iptv to (index + 1) }.toMap()
+    }
+
     var epgListVisible by remember { mutableStateOf(false) }
 
     Row(modifier = modifier) {
@@ -204,6 +210,7 @@ private fun LeanbackClassicPanelScreenContent(
             },
             epgListProvider = epgListProvider,
             initialIptvProvider = currentIptvProvider,
+            channelNoProvider = { channelNoMap[it] ?: 0 },
             onIptvSelected = onIptvSelected,
             onIptvFavoriteToggle = onIptvFavoriteToggle,
             onIptvFocused = { iptv, focusRequester ->

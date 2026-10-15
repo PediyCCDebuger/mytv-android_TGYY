@@ -57,6 +57,7 @@ fun LeanbackClassicPanelIptvList(
     iptvListProvider: () -> IptvList = { IptvList() },
     epgListProvider: () -> EpgList = { EpgList() },
     initialIptvProvider: () -> Iptv = { Iptv() },
+    channelNoProvider: (Iptv) -> Int = { 0 },
     onIptvSelected: (Iptv) -> Unit = {},
     onIptvFavoriteToggle: (Iptv) -> Unit = {},
     onIptvFocused: (Iptv, FocusRequester) -> Unit = { _, _ -> },
@@ -109,7 +110,7 @@ fun LeanbackClassicPanelIptvList(
             .width(220.dp)
             .background(MaterialTheme.colorScheme.background.copy(0.8f)),
     ) {
-        itemsIndexed(iptvList, key = { _, iptv -> iptv.hashCode() }) { index, iptv ->
+        itemsIndexed(iptvList, key = { _, iptv -> iptv.urlList.firstOrNull() ?: iptv.channelName }) { index, iptv ->
             val isSelected by remember { derivedStateOf { iptv == focusedIptv } }
             val initialFocused by remember {
                 derivedStateOf { !hasFocused && iptv == initialIptv }
@@ -117,6 +118,7 @@ fun LeanbackClassicPanelIptvList(
 
             LeanbackClassicPanelIptvItem(
                 iptvProvider = { iptv },
+                channelNoProvider = { channelNoProvider(iptv) },
                 epgProgrammeCurrentProvider = { epgListProvider().currentProgrammes(iptv) },
                 focusRequesterProvider = { itemFocusRequesterList[index] },
                 isSelectedProvider = { isSelected },
@@ -151,6 +153,7 @@ fun LeanbackClassicPanelIptvList(
 private fun LeanbackClassicPanelIptvItem(
     modifier: Modifier = Modifier,
     iptvProvider: () -> Iptv = { Iptv() },
+    channelNoProvider: () -> Int = { 0 },
     epgProgrammeCurrentProvider: () -> EpgProgrammeCurrent? = { null },
     focusRequesterProvider: () -> FocusRequester = { FocusRequester() },
     isSelectedProvider: () -> Boolean = { false },
@@ -163,6 +166,7 @@ private fun LeanbackClassicPanelIptvItem(
 ) {
     val iptv = iptvProvider()
     val focusRequester = focusRequesterProvider()
+    val channelNo = channelNoProvider()
     // 用“分钟桶”作为记忆键：避免每次重组都扫描 EPG（解决打开/滚动卡顿），
     // 同时每分钟刷新一次“正在播放”，兼顾流畅与实时
     val minuteBucket = System.currentTimeMillis() / 60_000L
@@ -218,7 +222,9 @@ private fun LeanbackClassicPanelIptvItem(
                 onClick = { },
                 headlineContent = {
                     Text(
-                        text = iptv.name,
+                        text = if (channelNo > 0)
+                            String.format("%02d  %s", channelNo, iptv.name)
+                        else iptv.name,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )

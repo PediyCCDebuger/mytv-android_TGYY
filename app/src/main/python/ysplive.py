@@ -2710,8 +2710,15 @@ def refresh_once (ch ):
                 ok =jce_refresh (ch )
             except Exception :
                 ch .mode ='bk'
-                log (f'[{ch .slug }] JCE 域名受限，自动切换 bkliveinfo 备用通道',min_interval =10.0 )
+                log (f'[{ch .slug }] JCE 不可用，自动切换 bkliveinfo 备用通道',min_interval =10.0 )
                 ok =bk_refresh (ch )
+            else :
+                # JCE 取到但未生成任何可播放分片(空列表/接口被限)时主动回退 bk，
+                # 否则频道会卡在“有模式但无数据”的僵死状态——典型如电视端无设备协议的卫视频道(江苏卫视等)始终 2004
+                if not (ch .segments or ch .bk_playlist ):
+                    ch .mode ='bk'
+                    log (f'[{ch .slug }] JCE 无可用分片，回退 bkliveinfo 备用通道',min_interval =10.0 )
+                    ok =bk_refresh (ch )
         if ok :
             ch .last_ok =time .time ()
         return ok 
@@ -2824,6 +2831,9 @@ def get_channel_instance (slug :str )->Channel |None :
     if meta :
         ch =Channel (meta ['slug'],meta ['name'],meta ['sid'],meta ['pid'],meta ['defn'])
         if canonical in FORCE_BK :
+            ch .mode ='bk'
+        elif resolver is None :
+            # 移动端无设备协议引擎(resolver 为 None)：JCE 主路不可靠，统一走 bk 主路
             ch .mode ='bk'
         CHANNEL_MAP [canonical ]=ch 
         return ch 
@@ -3234,9 +3244,10 @@ class Handler (BaseHTTPRequestHandler ):
             ensure_channel (ch )
             pl =build_playlist (ch ,holdback =True )
             if not (pl and '#EXTM3U'in pl ):
-                # 后端瞬时失败重试一次，缓解切台/冷启动时偶发的 2004
+                # 冷启动/切台首次请求时同步等待刷新完成（最长 10s），避免直接 503/2004；
+                # ensure_channel 已发起刷新，这里等待同一在途刷新收尾
                 try :
-                    coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =6.0 )
+                    coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =10.0 )
                 except Exception :
                     pass 
                 pl =build_playlist (ch ,holdback =True )
@@ -3484,6 +3495,20 @@ def main ():
         log ('[系统] 服务已停止')
     finally :
         stop_companion_engine ()
+def warmup_all_channels ():
+    """启动后主动预热所有频道：逐个触发后台刷新并填充播放列表，避免应用启动时批量冷拉
+    导致“启动初期 2004、过一会才恢复”。后台刷新循环在 IDLE_TIMEOUT 后自动停，不会常驻。"""
+    def _run ():
+        chs =list (CHANNEL_MAP .values ())
+        log (f'[系统] 启动预热：开始为 {len (chs )} 个频道拉取播放列表…')
+        for ch in chs :
+            try :
+                ensure_channel (ch )
+            except Exception :
+                pass 
+            time .sleep (0.15 )
+        log ('[系统] 启动预热：已发起全部频道首次刷新')
+    threading .Thread (target =_run ,daemon =True ,name ='warmup').start ()
 def start_server (port =8767 ,bind ='127.0.0.1',no_4k =True ,no_engine =True ,engine_port =8787 ,cache_mb =64 ,links_per_device =6 ,zap_debounce =10.0 ,timeout =10.0 ,data_dir =''):
     """供 Android (Chaquopy) 调用：在后台线程启动 HTTP 服务，不阻塞调用方。"""
     global resolver ,server_port ,global_channel_dir ,global_ts_cache ,_ysp_srv
@@ -3523,6 +3548,13 @@ def start_server (port =8767 ,bind ='127.0.0.1',no_4k =True ,no_engine =True ,en
         resolver .start_refresh_worker ()
         threading .Thread (target =init_resolver ,daemon =True ,name ='engine-init').start ()
     _ysp_srv =ThreadingHTTPServer ((bind ,port ),Handler )
+    # 移动端(无设备协议引擎)resolver 始终为 None：JCE 主路在电视端不可靠（公网 jce 接口易被限/不可达），
+    # 直接导致卫视等非 FORCE_BK 频道“空列表僵死、始终 2004”。这里统一改为 bk 主路，bk 不可用时再回退 jce
+    if resolver is None :
+        for _ch in CHANNEL_MAP .values ():
+            _ch .mode ='bk'
+        log ('[系统] 移动端模式：全部频道以 bkliveinfo 备用通道为主路（JCE 仅作兜底），规避无设备协议导致的 2004 僵死')
+        warmup_all_channels ()
     channels_count =len (global_channel_dir .unique_channels ())
     c_yangshi =len ([c for c in global_channel_dir .unique_channels ()if c ['group']=='央视'])
     c_weishi =len ([c for c in global_channel_dir .unique_channels ()if c ['group']=='卫视'])
