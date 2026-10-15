@@ -8,9 +8,11 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -25,6 +27,7 @@ import kotlinx.coroutines.launch
  */
 class YspLiveService : Service() {
     companion object {
+        private const val TAG = "YspLiveService"
         const val CHANNEL_ID = "ysp_live_channel"
         const val NOTIFICATION_ID = 8767
         const val PORT = 8767
@@ -33,10 +36,19 @@ class YspLiveService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("ysp-live 本地服务启动中…"))
+        try {
+            createNotificationChannel()
+            startForeground(NOTIFICATION_ID, buildNotification("ysp-live 本地服务启动中…"))
+        } catch (e: Exception) {
+            // 通知渠道/前台服务创建失败（部分系统或权限受限）不应拖垮主应用
+            Log.e(TAG, "前台服务/通知创建失败(非致命): ${e.message}", e)
+        }
 
-        CoroutineScope(Dispatchers.IO).launch {
+        CoroutineScope(
+            Dispatchers.IO + CoroutineExceptionHandler { _, e ->
+                Log.e(TAG, "ysp-live 协程异常(已隔离，不影响主应用): ${e.message}", e)
+            }
+        ).launch {
             try {
                 if (!pythonStarted) {
                     try {

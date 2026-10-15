@@ -2963,11 +2963,14 @@ class Handler (BaseHTTPRequestHandler ):
                 # 央视名称去掉连字符并去掉尾部描述，匹配 EPG 源(CCTV14 等)，
                 # 否则 tvg-name 带 “CCTV-14 少儿” 无法与 EPG 的 “CCTV14” 匹配，导致看不到央视节目单
                 disp_name =name 
-                if name .upper ().startswith ('CCTV'):
-                    _n =name .replace ('CCTV-','CCTV',1 ).replace ('cctv-','cctv',1 )
-                    _n =_n .split (' ')[0 ]
-                    if _n :
-                        disp_name =_n 
+                try :
+                    if isinstance (name ,str )and name .upper ().startswith ('CCTV'):
+                        _n =name .replace ('CCTV-','CCTV',1 ).replace ('cctv-','cctv',1 )
+                        _n =_n .split (' ')[0 ]
+                        if _n :
+                            disp_name =_n 
+                except Exception :
+                    disp_name =name
                 attrs =f' tvg-id="{tid }" tvg-name="{disp_name }" tvg-logo="{logo }" group-title="{grp }"'
                 if slug in TIMESHIFT_SUPPORTED :
                     attrs +=' catchup="append" catchup-days="7" catchup-source="?playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}"'
