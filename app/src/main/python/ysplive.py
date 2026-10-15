@@ -2866,6 +2866,9 @@ def fetch_upstream_engine_playlist (canonical :str ,host :str )->str |None :
         except Exception :
             pass 
     return None 
+# 客户端(播放器)连接超时：防止播放器停止读取(缓冲满/seek/异常断连)时
+# 服务端 wfile.write 永久阻塞、线程越积越多导致整个代理对所有频道完全无响应
+CLIENT_SOCKET_TIMEOUT =45.0 
 class Handler (BaseHTTPRequestHandler ):
     server_version ='ysp-live/9.4.0'
     def log_message (self ,fmt ,*args ):
@@ -2886,6 +2889,22 @@ class Handler (BaseHTTPRequestHandler ):
                 self .wfile .write (data )
         except (BrokenPipeError ,ConnectionResetError ):
             pass 
+    def setup (self ):
+        super ().setup ()
+        try :
+            self .connection .settimeout (CLIENT_SOCKET_TIMEOUT )
+        except Exception :
+            pass 
+    def handle (self ):
+        try :
+            super ().handle ()
+        except (socket .timeout ,TimeoutError ):
+            # 连接超时：直接关闭，释放线程（避免堆栈刷屏与线程堆积）
+            pass 
+        except (BrokenPipeError ,ConnectionResetError ):
+            pass 
+        except Exception as _he :
+            log (f'[http] 请求处理异常(已忽略，连接关闭): {type (_he ).__name__ }: {_he }',min_interval =30.0 )
     def do_HEAD (self ):
         self .do_GET (head_only =True )
     def do_GET (self ,head_only =False ):
@@ -3071,6 +3090,7 @@ class Handler (BaseHTTPRequestHandler ):
                 self ._send (500 ,f'{err }\n',head_only =head_only )
                 return 
             try :
+                headers_sent =False 
                 parts_url =urllib .parse .urlsplit (real_url )
                 host =parts_url .hostname 
                 if not host :
@@ -3094,9 +3114,9 @@ class Handler (BaseHTTPRequestHandler ):
                 conn =None 
                 for _ptry in range (2 ):
                     if is_https :
-                        conn =http .client .HTTPSConnection (host ,port ,timeout =30 ,context =ssl .create_default_context ())
+                        conn =http .client .HTTPSConnection (host ,port ,timeout =15 ,context =ssl .create_default_context ())
                     else :
-                        conn =http .client .HTTPConnection (host ,port ,timeout =30 )
+                        conn =http .client .HTTPConnection (host ,port ,timeout =15 )
                     try :
                         req_method ='HEAD'if head_only else 'GET'
                         conn .request (req_method ,target ,headers =headers )
@@ -3112,6 +3132,11 @@ class Handler (BaseHTTPRequestHandler ):
                             time .sleep (0.4 )
                         else :
                             raise 
+                if conn .sock :
+                    try :
+                        conn .sock .settimeout (15.0 )
+                    except Exception :
+                        pass 
                 if conn is None or resp is None :
                     raise RuntimeError ('upstream connect failed')
                 try :
@@ -3127,6 +3152,7 @@ class Handler (BaseHTTPRequestHandler ):
                     self .send_header ('Access-Control-Allow-Origin','*')
                     self .send_header ('Cache-Control','public, max-age=300')
                     self .end_headers ()
+                    headers_sent =True 
                     if not head_only :
                         body_buffer =bytearray ()
                         is_oversized =False 
@@ -3139,11 +3165,19 @@ class Handler (BaseHTTPRequestHandler ):
                                     is_oversized =True 
                             except ValueError :
                                 pass 
+                        transfer_start =time .time ()
+                        total_read =0 
                         while True :
                             chunk =resp .read (262144 )
                             if not chunk :
                                 break 
                             self .wfile .write (chunk )
+                            total_read +=len (chunk )
+                            # 防卡死：单分片传输超过 90 秒或 300MB 直接中止，
+                            # 避免上游慢速滴流把代理线程拖死（表现为画面静止/频道无响应）
+                            if (time .time ()-transfer_start )>90.0 or total_read >300 *1024 *1024 :
+                                log (f'[proxy.ts] 分片传输超时/超限，中止转发 ({total_read //1024 }KB)',min_interval =20.0 )
+                                break 
                             if resp .status ==200 and not is_oversized :
                                 if len (body_buffer )+len (chunk )<=35 *1024 *1024 :
                                     body_buffer .extend (chunk )
@@ -3157,11 +3191,19 @@ class Handler (BaseHTTPRequestHandler ):
                     conn .close ()
             except (BrokenPipeError ,ConnectionResetError ):
                 pass 
+            except socket .timeout :
+                # 上行/下行超时：响应头尚未发出才回 502；已发出的只能关闭连接，由客户端重试下一片
+                if not headers_sent :
+                    try :
+                        self .send_error (502 ,'Upstream/downstream timeout')
+                    except Exception :
+                        pass 
             except Exception as e :
-                try :
-                    self .send_error (502 ,f'Upstream CDN error: {e }')
-                except Exception :
-                    pass 
+                if not headers_sent :
+                    try :
+                        self .send_error (502 ,f'Upstream CDN error: {e }')
+                    except Exception :
+                        pass 
             return 
         if path =='/engine_proxy':
             qs =urllib .parse .parse_qs (parts .query )
