@@ -2351,7 +2351,7 @@ TVG_IDS ={
 'cctv5':'CCTV5','cctv5p':'CCTV5+','cctv6':'CCTV6','cctv7':'CCTV7',
 'cctv8':'CCTV8','cctv9':'CCTV9','cctv10':'CCTV10','cctv11':'CCTV11',
 'cctv12':'CCTV12','cctv13':'CCTV13','cctv14':'CCTV14','cctv15':'CCTV15',
-'cctv16':'CCTV16','cctv164k':'CCTV16','cctv17':'CCTV17','cctv4k':'CCTV4K',
+'cctv16':'CCTV16','cctv164k':'CCTV164K','cctv17':'CCTV17','cctv4k':'CCTV4K',
 'cctv8k':'CCTV-8K','cgtn':'CGTN英语','cgtnfr':'CGTN法语','cgtnru':'CGTN俄语',
 'cgtnar':'CGTN阿语','cgtnes':'CGTN西语','cgtndoc':'CGTN纪录',
 'cctvdyjc':'CCTV第一剧场','cctvfyjc':'CCTV风云剧场','cctvhjjc':'CCTV怀旧剧场',
@@ -2684,11 +2684,15 @@ def bk_refresh (ch ):
                 return True 
             except urllib .error .HTTPError as e :
                 last_err ='HTTPError: HTTP %s'%e .code 
+                time .sleep (0.3 )
                 continue 
             except Exception as e :
+                # CDN 偶发提前断流(如 IncompleteRead)，立即重试往往同样失败，先短暂退避
                 last_err ='%s: %s'%(type (e ).__name__ ,e )
+                time .sleep (0.4 )
         if attempt ==0 :
             try :
+                time .sleep (0.5 )
                 ch .bk_urls =bk_playurls (ch .sid ,ch .pid ,ch .defn ,ch .guid )
                 ch .bk_urls_time =time .time ()
                 log (f'[{ch .slug }] {defn_label (ch .defn )} 地址已过期，已重新拉取',min_interval =10.0 )
@@ -2723,7 +2727,9 @@ def refresh_loop (ch ):
         if ok :
             build_playlist (ch ,holdback =True )
         fails =0 if ok else fails +1 
-        time .sleep (REFRESH_INTERVAL if fails <3 else 30 )
+        # 连续失败时缩短退避(原 30s 会让缓存陈旧超过 15s 新鲜窗口，
+        # 播放器轮询只能同步强拉，失败即 503 → 播放器报 2004)
+        time .sleep (REFRESH_INTERVAL if fails <3 else 12 )
     log (f'[{ch .slug }] 空闲超时，已停止后台拉取',min_interval =10.0 )
 def ensure_channel (ch ):
     now =time .time ()
@@ -2961,12 +2967,16 @@ class Handler (BaseHTTPRequestHandler ):
                 if only_4k and (slug not in TRUE_4K_CHANNELS ):
                     continue 
                 # 央视名称去掉连字符并去掉尾部描述，匹配 EPG 源(CCTV14 等)，
-                # 否则 tvg-name 带 “CCTV-14 少儿” 无法与 EPG 的 “CCTV14” 匹配，导致看不到央视节目单
+                # 否则 tvg-name 带 “CCTV-14 少儿” 无法与 EPG 的 “CCTV14” 匹配，导致看不到央视节目单。
+                # 注意：末尾若为 4K/8K 等清晰度后缀必须保留，否则 “CCTV16 4K” 会被截成 “CCTV16”，
+                # 与主频道同名而看似被合并（CCTV-16 4K → CCTV16 4K，CCTV-4K 超高清 → CCTV4K）
                 disp_name =name 
                 try :
                     if isinstance (name ,str )and name .upper ().startswith ('CCTV'):
-                        _n =name .replace ('CCTV-','CCTV',1 ).replace ('cctv-','cctv',1 )
-                        _n =_n .split (' ')[0 ]
+                        _parts =name .split (' ')
+                        _n =_parts [0 ].replace ('CCTV-','CCTV',1 ).replace ('cctv-','cctv',1 )
+                        if len (_parts )>1 and re .fullmatch (r'\d+K',_parts [-1 ],re .IGNORECASE ):
+                            _n =_n +' '+_parts [-1 ].upper ()
                         if _n :
                             disp_name =_n 
                 except Exception :
@@ -3068,14 +3078,33 @@ class Handler (BaseHTTPRequestHandler ):
                     extra ['Range']=header_value_clean (range_header )
                 headers =_playback_request_headers (playback_headers ,extra )
                 headers ['Host']=host_header 
-                if is_https :
-                    conn =http .client .HTTPSConnection (host ,port ,timeout =30 ,context =ssl .create_default_context ())
-                else :
-                    conn =http .client .HTTPConnection (host ,port ,timeout =30 )
+                # 连接级瞬时失败(CDN 抖动/并发限制)重试一次：
+                # 必须在向客户端写出任何字节之前完成，否则无法安全重试
+                resp =None 
+                conn =None 
+                for _ptry in range (2 ):
+                    if is_https :
+                        conn =http .client .HTTPSConnection (host ,port ,timeout =30 ,context =ssl .create_default_context ())
+                    else :
+                        conn =http .client .HTTPConnection (host ,port ,timeout =30 )
+                    try :
+                        req_method ='HEAD'if head_only else 'GET'
+                        conn .request (req_method ,target ,headers =headers )
+                        resp =conn .getresponse ()
+                        break 
+                    except Exception :
+                        try :
+                            conn .close ()
+                        except Exception :
+                            pass 
+                        conn =None 
+                        if _ptry ==0 :
+                            time .sleep (0.4 )
+                        else :
+                            raise 
+                if conn is None or resp is None :
+                    raise RuntimeError ('upstream connect failed')
                 try :
-                    req_method ='HEAD'if head_only else 'GET'
-                    conn .request (req_method ,target ,headers =headers )
-                    resp =conn .getresponse ()
                     resp_headers_to_pass ={}
                     for k ,v in resp .getheaders ():
                         kl =k .lower ()
@@ -3243,6 +3272,23 @@ class Handler (BaseHTTPRequestHandler ):
                     pass 
                 finally :
                     ch .defn =_defn_saved 
+            # 兜底：刷新全部失败时返回上一次构建的播放列表(即使陈旧)，
+            # 而不是 503。503 会让播放器直接报 2004 并中断观看；陈旧列表中的
+            # 分片地址通常仍有几分钟签名有效期，足以撑过 CDN 瞬时抖动，
+            # 后台刷新恢复后即回到正常轮换
+            if not (pl and '#EXTM3U'in pl ):
+                with ch .lock :
+                    stale_pl =ch .last_built_playlist 
+                    stale_age =time .time ()-ch .last_built_time 
+                if stale_pl and '#EXTM3U'in stale_pl and stale_age <300.0 :
+                    log (f'[{ch .slug }] 刷新暂不可用({(ch .last_error or "")[:60 ]})，沿用上次播放列表',min_interval =10.0 )
+                    with ch .lock :
+                        prev_src =getattr (ch ,'last_m3u8_source',None )
+                        ch .last_m3u8_source ='bk'
+                    if prev_src =='device':
+                        stale_pl =stale_pl .replace ('#EXTM3U','#EXTM3U\n#EXT-X-DISCONTINUITY',1 )
+                    self ._send (200 ,stale_pl ,'application/vnd.apple.mpegurl',head_only =head_only )
+                    return 
             if pl and '#EXTM3U'in pl :
                 with ch .lock :
                     prev_src =getattr (ch ,'last_m3u8_source',None )
