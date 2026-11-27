@@ -2575,6 +2575,20 @@ def bk_playurls (channel_id ,live_pid ,defn ='fhd'):
         raise RuntimeError ('no playurl')
     urls .sort (key =lambda u :(0 if 'bklive-'in u else 1 ,u ))
     return urls 
+def bk_urls_direct_safe (channel_id ,live_pid ,defn ='fhd',max_try =8):
+    """移动端：bkliveinfo 约 1/3 概率只返回 hlsliveali/liveten 节点，
+    这类节点要求 APPID/APPSIGN/APPRANDOMSTR 鉴权头；移动端没有对应的设备签名头缓存，
+    /proxy.ts 转发会报 missing cached signed playback headers -> 500，
+    播放器裸连这类节点又必 403 -> 频道彻底播不了。
+    dtocnc 节点可裸连（实测 206），故反复换取直到拿到可裸连节点组。
+    带上限避免上游持续只给鉴权节点时死循环；实在拿不到就原样返回。"""
+    urls =bk_playurls (channel_id ,live_pid ,defn )
+    for _ in range (max_try ):
+        hosts =[urllib .parse .urlsplit (u ).hostname or '' for u in urls ]
+        if hosts and not all (live_playback_host_needs_signed_headers (h )for h in hosts ):
+            return urls
+        urls =bk_playurls (channel_id ,live_pid ,defn )
+    return urls
 def fetch_abs_playlist (url ,depth =0 ,headers :dict |None =None ,timeout :float =8.0 ):
     req_headers =dict (headers )if headers else {'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'application/vnd.apple.mpegurl,application/json,*/*'}
     req =urllib .request .Request (url ,headers =req_headers )
@@ -3280,7 +3294,7 @@ def bk_refresh (ch ):
     global_flow_limiter .wait_slot ()
     now =time .time ()
     if now -ch .bk_urls_time >BK_URL_TTL or not ch .bk_urls :
-        ch .bk_urls =bk_playurls (ch .sid ,ch .pid ,ch .defn )
+        ch .bk_urls =bk_urls_direct_safe (ch .sid ,ch .pid ,ch .defn )
         ch .bk_urls_time =now 
         log (f'[{ch .slug }] bkliveinfo 备用通道就绪 ({len (ch .bk_urls )} 地址)',min_interval =60.0 )
     last_err =''
@@ -3303,7 +3317,7 @@ def bk_refresh (ch ):
                 last_err ='%s: %s'%(type (e ).__name__ ,e )
         if attempt ==0 :
             try :
-                ch .bk_urls =bk_playurls (ch .sid ,ch .pid ,ch .defn )
+                ch .bk_urls =bk_urls_direct_safe (ch .sid ,ch .pid ,ch .defn )
                 ch .bk_urls_time =time .time ()
                 log (f'[{ch .slug }] {defn_label (ch .defn )} 地址已过期，已重新拉取',min_interval =10.0 )
             except Exception :
