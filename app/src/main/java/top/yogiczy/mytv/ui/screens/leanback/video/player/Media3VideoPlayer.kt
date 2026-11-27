@@ -34,6 +34,11 @@ class LeanbackMedia3VideoPlayer(
     private val context: Context,
     private val coroutineScope: CoroutineScope,
 ) : LeanbackVideoPlayer(coroutineScope) {
+    companion object {
+        private const val IO_RETRY_MAX = 3
+        private const val IO_RETRY_DELAY_MS = 1500L
+    }
+
     private val videoPlayer = ExoPlayer.Builder(
         context,
         DefaultRenderersFactory(context).setExtensionRendererMode(EXTENSION_RENDERER_MODE_ON)
@@ -43,9 +48,17 @@ class LeanbackMedia3VideoPlayer(
 
     private val contentTypeAttempts = mutableMapOf<Int, Boolean>()
     private var updatePositionJob: Job? = null
+    // 本机内核启动初期可能短暂返回 403/500（播放列表尚未就绪），
+    // 此时内核会在数秒内自行恢复；播放器需要有限次重试而不是直接卡在失败画面。
+    private var ioRetryCount = 0
+    private var ioRetryJob: Job? = null
 
     @OptIn(UnstableApi::class)
-    private fun prepare(uri: Uri, contentType: Int? = null) {
+    private fun prepare(uri: Uri, contentType: Int? = null, countRetry: Boolean = true) {
+        if (countRetry) {
+            ioRetryJob?.cancel()
+            ioRetryCount = 0
+        }
         val dataSourceFactory =
             DefaultDataSource.Factory(context, DefaultHttpDataSource.Factory().apply {
                 setUserAgent(SP.videoPlayerUserAgent)
@@ -115,11 +128,35 @@ class LeanbackMedia3VideoPlayer(
                         triggerError(PlaybackException.UNSUPPORTED_TYPE)
                     }
                 }
+            } else if (isRecoverableIoError(ex.errorCode) && ioRetryCount < IO_RETRY_MAX) {
+                // 403/500/连接失败多为内核瞬时未就绪或上游抖动，等内核刷新后重拉播放列表。
+                val uri = videoPlayer.currentMediaItem?.localConfiguration?.uri
+                if (uri != null) {
+                    ioRetryCount += 1
+                    ioRetryJob?.cancel()
+                    ioRetryJob = coroutineScope.launch {
+                        delay(IO_RETRY_DELAY_MS * ioRetryCount)
+                        prepare(uri, countRetry = false)
+                    }
+                    triggerError(null)
+                    triggerBuffering(true)
+                    return
+                }
+                triggerError(PlaybackException(ex.errorCodeName, ex.errorCode))
             } else {
                 triggerError(
                     PlaybackException(ex.errorCodeName, ex.errorCode)
                 )
             }
+        }
+
+        private fun isRecoverableIoError(code: Int): Boolean = when (code) {
+            Media3PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+            Media3PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+            Media3PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+            Media3PlaybackException.ERROR_CODE_IO_UNSPECIFIED -> true
+
+            else -> false
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
