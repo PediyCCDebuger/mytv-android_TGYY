@@ -3291,15 +3291,22 @@ def wrap_bk_playlist_ts_urls (playlist :str ,base_url :str )->str :
             out .append (line )
     return '\n'.join (out )+'\n'
 def bk_refresh (ch ):
+    # 移动端鲁棒换取：bkliveinfo 既会返回需鉴权的 hlsliveali 节点（/proxy.ts 无签名头->500），
+    # 也会返回可裸连但偶发 HTTP 403 的 dtocnc 节点。故多轮换取+验证，任一地址真正拉到 #EXTM3U 才算成功。
     global_flow_limiter .wait_slot ()
-    now =time .time ()
-    if now -ch .bk_urls_time >BK_URL_TTL or not ch .bk_urls :
-        ch .bk_urls =bk_urls_direct_safe (ch .sid ,ch .pid ,ch .defn )
-        ch .bk_urls_time =now 
-        log (f'[{ch .slug }] bkliveinfo 备用通道就绪 ({len (ch .bk_urls )} 地址)',min_interval =60.0 )
     last_err =''
-    for attempt in range (2 ):
-        for u in list (ch .bk_urls ):
+    urls =list (ch .bk_urls )if (ch .bk_urls and time .time ()-ch .bk_urls_time <=BK_URL_TTL )else []
+    for attempt in range (4 ):
+        if not urls :
+            try :
+                urls =bk_urls_direct_safe (ch .sid ,ch .pid ,ch .defn )
+                ch .bk_urls =urls 
+                ch .bk_urls_time =time .time ()
+                log (f'[{ch .slug }] bkliveinfo 地址就绪 ({len (urls )} 个可裸连地址)',min_interval =60.0 )
+            except Exception as e :
+                last_err ='playurls: %s'%e 
+                urls =[]
+        for u in list (urls ):
             try :
                 pl =fetch_abs_playlist (u )
                 if '#EXTM3U'not in pl :
@@ -3315,13 +3322,11 @@ def bk_refresh (ch ):
                 continue 
             except Exception as e :
                 last_err ='%s: %s'%(type (e ).__name__ ,e )
-        if attempt ==0 :
-            try :
-                ch .bk_urls =bk_urls_direct_safe (ch .sid ,ch .pid ,ch .defn )
-                ch .bk_urls_time =time .time ()
-                log (f'[{ch .slug }] {defn_label (ch .defn )} 地址已过期，已重新拉取',min_interval =10.0 )
-            except Exception :
-                pass 
+        # 本轮全部失败（多为空列表或 403），丢弃并重新换取；带小退避避免猛打上游
+        urls =[]
+        if attempt <3 :
+            time .sleep (0.3 * (attempt +1 ))
+            global_flow_limiter .wait_slot ()
     ch .bk_urls =[]
     ch .bk_urls_time =0 
     raise RuntimeError (last_err [:120 ]or 'bk playlist failed')
