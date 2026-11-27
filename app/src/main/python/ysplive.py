@@ -2590,11 +2590,11 @@ def bk_urls_direct_safe (channel_id ,live_pid ,defn ='fhd',max_try =8):
         urls =bk_playurls (channel_id ,live_pid ,defn )
     return urls
 def fetch_abs_playlist (url ,depth =0 ,headers :dict |None =None ,timeout :float =8.0 ):
-    req_headers =dict (headers )if headers else {'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'application/vnd.apple.mpegurl,application/json,*/*'}
-    req =urllib .request .Request (url ,headers =req_headers )
-    with urllib .request .urlopen (req ,timeout =timeout )as r :
-        text =r .read ().decode ('utf-8','replace')
-        final =r .geturl ()
+    # 用 http.client 而非 urllib：bk CDN 的 nginx 会拦截 urllib 请求指纹返回 403，
+    # 而 http.client 手动构造的请求头（Host/UA/Accept/Referer）实测可正常 200。
+    # 与 /proxy.ts 的转发实现保持一致，手机端无需额外二进制。
+    req_headers =dict (headers )if headers else {'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'*/*'}
+    text ,final =_http_fetch_text (url ,req_headers ,timeout )
     if depth <2 :
         lines =text .splitlines ()
         for i ,ln in enumerate (lines ):
@@ -2612,6 +2612,49 @@ def fetch_abs_playlist (url ,depth =0 ,headers :dict |None =None ,timeout :float
         else :
             out .append (ln )
     return '\n'.join (out )
+def _http_fetch_text (url ,headers :dict ,timeout :float =8.0 ,max_redirects =3 ):
+    """用 http.client 抓文本（m3u8），返回 (text, final_url)。
+    urllib.request 在部分 Android/Chaquopy 环境被 bk CDN 判为爬虫返回 403，
+    http.client 手动头可绕过。跟随重定向。"""
+    cur =url 
+    for _ in range (max_redirects ):
+        parts =urllib .parse .urlsplit (cur )
+        scheme =(parts .scheme or 'https').lower ()
+        host =parts .hostname 
+        if not host :
+            raise ValueError (f'no host in url: {cur }')
+        port =parts .port or (443 if scheme =='https' else 80 )
+        target =parts .path or '/'
+        if parts .query :
+            target +='?'+parts .query 
+        h =dict (headers )
+        h .setdefault ('Host',host )
+        if scheme =='https' :
+            ctx =ssl .create_default_context ()
+            conn =http .client .HTTPSConnection (host ,port ,timeout =timeout ,context =ctx )
+        else :
+            conn =http .client .HTTPConnection (host ,port ,timeout =timeout )
+        try :
+            conn .request ('GET',target ,headers =h )
+            resp =conn .getresponse ()
+            if resp .status in (301 ,302 ,303 ,307 ,308 ):
+                loc =resp .getheader ('Location')
+                resp .read ()
+                if not loc :
+                    raise RuntimeError ('redirect without Location')
+                cur =urllib .parse .urljoin (cur ,loc )
+                continue 
+            if resp .status !=200 :
+                body =resp .read ()
+                raise urllib .error .HTTPError (cur ,resp .status ,resp .reason ,resp .getheaders (),body )
+            data =resp .read ()
+            return data .decode ('utf-8','replace'),cur 
+        finally :
+            try :
+                conn .close ()
+            except Exception :
+                pass 
+    raise RuntimeError ('too many redirects')
 
 _catchup_url_cache :collections .OrderedDict [tuple [str ,int ,int ],tuple [str ,float ]] =collections .OrderedDict ()
 _catchup_cache_lock =threading .Lock ()
