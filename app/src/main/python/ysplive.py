@@ -24,6 +24,7 @@ import shutil
 import signal 
 import socket 
 import ssl 
+import subprocess 
 import struct 
 import sys 
 import threading 
@@ -2616,6 +2617,7 @@ def _http_fetch_text (url ,headers :dict ,timeout :float =8.0 ,max_redirects =3 
     """用 http.client 抓文本（m3u8），返回 (text, final_url)。
     urllib.request 在部分 Android/Chaquopy 环境被 bk CDN 判为爬虫返回 403，
     http.client 手动头可绕过。跟随重定向。"""
+    last_err =None
     cur =url 
     for _ in range (max_redirects ):
         parts =urllib .parse .urlsplit (cur )
@@ -2646,15 +2648,53 @@ def _http_fetch_text (url ,headers :dict ,timeout :float =8.0 ,max_redirects =3 
                 continue 
             if resp .status !=200 :
                 body =resp .read ()
-                raise urllib .error .HTTPError (cur ,resp .status ,resp .reason ,resp .getheaders (),body )
+                last_err =urllib .error .HTTPError (cur ,resp .status ,resp .reason ,resp .getheaders (),body )
+                break 
             data =resp .read ()
             return data .decode ('utf-8','replace'),cur 
+        except (OSError ,ssl .SSLError ,http .client .HTTPException )as e :
+            last_err =e 
+            break 
         finally :
             try :
                 conn .close ()
             except Exception :
                 pass 
-    raise RuntimeError ('too many redirects')
+    # 兜底：部分 Android/Chaquopy 环境的 TLS 指纹被 CDN nginx 拒（403），
+    # 系统 curl 可正常请求。用 curl 重试，避免频道整体打不开。
+    try :
+        text =_curl_fetch_text (url ,headers ,timeout )
+        if text is not None :
+            return text ,url
+    except Exception :
+        pass 
+    if last_err :
+        raise last_err 
+    raise RuntimeError ('fetch failed')
+
+def _curl_fetch_text (url ,headers :dict ,timeout :float ):
+    """用系统 curl 抓文本；无 curl 返回 None。仅作 http.client 被拒时的兜底。"""
+    exe =shutil .which ('curl')
+    if not exe :
+        for p in ('/system/bin/curl','/usr/bin/curl','/bin/curl'):
+            if os .path .exists (p ):
+                exe =p 
+                break 
+    if not exe :
+        return None
+    cmd =[exe ,'-sSL','--fail','--max-time',str (max (3 ,int (timeout )))]
+    for k ,v in headers .items ():
+        if k .lower ()=='host':
+            continue
+        cmd +=['-H',f'{k }: {v }']
+    cmd .append (url )
+    try :
+        r =subprocess .run (cmd ,capture_output =True ,timeout =timeout +6 )
+    except Exception :
+        return None
+    if r .returncode !=0 :
+        return None
+    return r .stdout .decode ('utf-8','replace')
 
 _catchup_url_cache :collections .OrderedDict [tuple [str ,int ,int ],tuple [str ,float ]] =collections .OrderedDict ()
 _catchup_cache_lock =threading .Lock ()
