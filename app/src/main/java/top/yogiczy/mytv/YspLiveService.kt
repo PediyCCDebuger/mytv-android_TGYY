@@ -108,7 +108,11 @@ class YspLiveService : Service() {
     /**
      * 释放内置设备凭证到 filesDir。这些文件含已注册的 cloud_guid，
      * 高码率设备协议据此直接激活，避免现场云注册失败（empty guid）。
-     * 只在目标不存在时写入，保留内核运行时更新的状态。
+     *
+     * 凭证有有效期：旧 cloud_guid 被服务端废弃后，高码率分片会 403。
+     * 因此用 assets/ysp/credential-version.txt 标记版本：仅当内置版本高于
+     * filesDir 中已释放的版本时才覆盖，版本相同时保留内核运行时更新的
+     * 心跳/刷新状态（包括内核自动更换的新身份）。
      */
     private fun copyDeviceCredentials() {
         val names = arrayOf(
@@ -116,15 +120,36 @@ class YspLiveService : Service() {
             "device-state-rs-slot1.json",
             "device-state-rs-slot2.json",
         )
+        val markerName = "credential-version.txt"
+        val assetVersion = try {
+            assets.open("ysp/$markerName").bufferedReader().use { it.readText().trim().toIntOrNull() ?: 1 }
+        } catch (_: Exception) {
+            1
+        }
+        val marker = File(filesDir, markerName)
+        val currentVersion = try {
+            if (marker.exists()) marker.readText().trim().toIntOrNull() ?: 0 else 0
+        } catch (_: Exception) {
+            0
+        }
+        val needRefresh = currentVersion < assetVersion || names.any { !File(filesDir, it).exists() }
         for (name in names) {
             try {
                 val target = File(filesDir, name)
-                if (target.exists()) continue
+                if (target.exists() && !needRefresh) continue
                 assets.open("ysp/$name").use { input ->
                     FileOutputStream(target).use { out -> input.copyTo(out) }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "释放设备凭证 $name 失败: ${e.message}")
+            }
+        }
+        if (needRefresh) {
+            try {
+                marker.writeText(assetVersion.toString())
+                Log.i(TAG, "内置设备凭证已更新到版本 $assetVersion")
+            } catch (e: Exception) {
+                Log.w(TAG, "写入凭证版本标记失败: ${e.message}")
             }
         }
     }

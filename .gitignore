@@ -27,3 +27,5 @@ key.properties
 # Python cache
 __pycache__/
 *.pyc
+# 本地模拟器测试产物
+/.test-apk/
