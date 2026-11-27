@@ -128,6 +128,10 @@ class LeanbackMedia3VideoPlayer(
                         triggerError(PlaybackException.UNSUPPORTED_TYPE)
                     }
                 }
+            } else if (isDecodingError(ex.errorCode)) {
+                // 4K/HEVC/10bit 频道在不支持硬解的设备（如 x86 模拟器）上会解码失败黑屏。
+                // 给出明确提示，避免用户误以为是无信号或网络问题。
+                triggerError(PlaybackException.DECODER_UNSUPPORTED)
             } else if (isRecoverableIoError(ex.errorCode) && ioRetryCount < IO_RETRY_MAX) {
                 // 403/500/连接失败多为内核瞬时未就绪或上游抖动，等内核刷新后重拉播放列表。
                 val uri = videoPlayer.currentMediaItem?.localConfiguration?.uri
@@ -155,6 +159,15 @@ class LeanbackMedia3VideoPlayer(
             Media3PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
             Media3PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
             Media3PlaybackException.ERROR_CODE_IO_UNSPECIFIED -> true
+
+            else -> false
+        }
+
+        private fun isDecodingError(code: Int): Boolean = when (code) {
+            Media3PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+            Media3PlaybackException.ERROR_CODE_DECODING_FAILED,
+            Media3PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+            Media3PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED -> true
 
             else -> false
         }

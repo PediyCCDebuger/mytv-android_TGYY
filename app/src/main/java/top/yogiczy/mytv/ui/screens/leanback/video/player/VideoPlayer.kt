@@ -136,6 +136,8 @@ abstract class LeanbackVideoPlayer(
                 PlaybackException("UNSUPPORTED_TYPE", 10002)
             val LOAD_TIMEOUT =
                 PlaybackException("LOAD_TIMEOUT", 10003)
+            val DECODER_UNSUPPORTED =
+                PlaybackException("设备不支持该频道解码(4K/HEVC)", 10004)
         }
     }
 

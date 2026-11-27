@@ -199,7 +199,11 @@ private fun LeanbackMainSettingsHandle(
         focusRequester.requestFocus()
     }
 
-    LeanbackBackPressHandledArea(onBackPressed = onBackPressed) {
+    LeanbackBackPressHandledArea(onBackPressed = {
+        // 设置页打开时，返回先回到直播/加载界面，而不是退出应用
+        if (showSettings) showSettings = false
+        else onBackPressed()
+    }) {
         Box(
             modifier = modifier
                 .focusRequester(focusRequester)

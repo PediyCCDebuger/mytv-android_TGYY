@@ -3604,9 +3604,26 @@ class Handler (BaseHTTPRequestHandler ):
             },
             "channels":len (global_channel_dir .unique_channels ()),
             "ts_cache":cache_info ,
-            "routes":["/","/all.m3u","/diag","/health","/<channel>.m3u8","/proxy.ts"]
+            "routes":["/","/all.m3u","/diag","/health","/log","/<channel>.m3u8","/proxy.ts"]
             }
             self ._send (200 ,json .dumps (health_data ,ensure_ascii =False ,indent =2 ),'application/json; charset=utf-8',head_only =head_only )
+            return 
+        if path =='/log':
+            # APP「ysp-live 日志」页轮询此接口；返回 its expected JSON shape。
+            # 对设备 GUID 等敏感字段脱敏，避免日志页泄露设备身份。
+            import re as _re_log
+            clean_lines =[]
+            for _ln in list (global_log_ring )[-50 :]:
+                _s =_re_log .sub (r'\033\[[0-9;]*m','',str (_ln ))
+                _s =_re_log .sub (r'([0-9A-Fa-f ]{8}-[0-9A-Fa-f ]{4}-[0-9A-Fa-f ]{4}-[0-9A-Fa-f ]{4}-[0-9A-Fa-f ]{12}(?:-[A-Za-z0-9]+)?)','<GUID已隐藏>',_s )
+                clean_lines .append (_s )
+            log_data ={
+            "count":len (global_log_ring ),
+            "uptime_sec":int (time .time ()-server_start_time ),
+            "engine_ready":bool (resolver_ready ()),
+            "lines":clean_lines ,
+            }
+            self ._send (200 ,json .dumps (log_data ,ensure_ascii =False ),'application/json; charset=utf-8',head_only =head_only )
             return 
         if path =='/all.m3u':
             host =self .headers .get ('Host',f'localhost:{server_port }')
@@ -3616,7 +3633,7 @@ class Handler (BaseHTTPRequestHandler ):
             k4_val =qs .get ('k4',['0'])[0 ].lower ()
             only_4k =k4_val in ('1','true','yes')
             lines =[
-            '#EXTM3U url-tvg="https://epg.zsdc.eu.org/t.xml.gz,https://epg.pw/xmltv/epg_CN.xml.gz" x-tvg-url="https://epg.zsdc.eu.org/t.xml.gz"',
+            '#EXTM3U url-tvg="https://epg.136605.xyz/3days.xml,https://epg.zsdc.eu.org/t.xml.gz" x-tvg-url="https://epg.136605.xyz/3days.xml"',
             '#EXT-X-APTV-PREVIEW: FALSE',
             '#EXT-X-APTV-LATENCY: FALSE',
             '#EXT-X-APTV-LOGO: FALSE'
@@ -3861,10 +3878,20 @@ class Handler (BaseHTTPRequestHandler ):
                 cached_pl =ch .last_built_playlist 
                 cached_source = ch.last_built_source
                 cached_age =now_ts -ch .last_built_time 
-            if cached_pl and cached_age <15.0 and ('#EXTM3U'in cached_pl ):
+            if cached_pl and cached_age <60.0 and ('#EXTM3U'in cached_pl ):
+                # 恢复 v1.0.10 的 60s 缓存窗口：切台回来直接命中，避免每次重新解析
                 self.send_live_playlist(ch, cached_source, cached_pl, head_only, cached=True)
                 if cached_age >6.0 :
                     trigger_background_refresh (ch )
+                return 
+            # 陈旧播放列表兜底：刷新未就绪时先用上次列表顶上（<300s），后台继续刷新。
+            # 换台时不必干等鉴权/高码率解析，切台速度明显提升；v1.0.10 验证过的策略。
+            stale_pl =ch .last_built_playlist 
+            stale_age =now_ts -ch .last_built_time 
+            if stale_pl and '#EXTM3U'in stale_pl and stale_age <300.0 :
+                log (f'[{ch .slug }] 换台暂用上次播放列表 (已用 {stale_age :.0f}s)，后台刷新中',min_interval =10.0 )
+                trigger_background_refresh (ch )
+                self .send_live_playlist(ch, ch .last_built_source, stale_pl, head_only, cached=True )
                 return 
             ch .register_client (self .connection )
             try :
@@ -3882,6 +3909,12 @@ class Handler (BaseHTTPRequestHandler ):
             upstream_pl =fetch_upstream_engine_playlist (canonical ,self .headers .get ('Host',f'localhost:{server_port }'),proto )
             if upstream_pl and '#EXTM3U'in upstream_pl :
                 self.send_live_playlist(ch, 'engine', upstream_pl, head_only)
+                return 
+            # 最后一次兜底：即使超过 300s，只要还有旧列表就先出画面，总比 503 黑屏好
+            if stale_pl and '#EXTM3U'in stale_pl :
+                log (f'[{ch .slug }] 刷新失败，沿用陈旧播放列表 ({stale_age :.0f}s) 兜底',min_interval =10.0 )
+                trigger_background_refresh (ch )
+                self .send_live_playlist(ch, ch .last_built_source, stale_pl, head_only, cached=True )
                 return 
             self ._send (503 ,'频道 %s 暂无数据 (%s), 请稍后重试\n'%(ch .name ,ch .last_error or '拉取中'),head_only =head_only )
             return 

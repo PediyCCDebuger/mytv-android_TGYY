@@ -19,7 +19,12 @@ class M3uIptvParser : IptvParser {
             if (!line.startsWith("#EXTINF")) return@forEachIndexed
 
             val name = line.split(",").last()
-            val channelName = Regex("tvg-name=\"(.+?)\"").find(line)?.groupValues?.get(1) ?: name
+            // 节目单匹配键：优先用 tvg-id（如 CCTV1），与 EPG 源的 display-name 对齐；
+            // tvg-name 常带连字符/后缀（如 "CCTV-1 综合"），直接匹配会导致"无节目单"。
+            val channelName = Regex("tvg-id=\"(.+?)\"").find(line)?.groupValues?.get(1)
+                ?.takeIf { it.isNotBlank() }
+                ?: Regex("tvg-name=\"(.+?)\"").find(line)?.groupValues?.get(1)
+                ?: name
             val groupName = Regex("group-title=\"(.+?)\"").find(line)?.groupValues?.get(1) ?: "其他"
 
             iptvList.add(
