@@ -9,6 +9,8 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import java.io.File
+import java.io.FileOutputStream
 import androidx.core.app.NotificationCompat
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
@@ -22,8 +24,9 @@ import kotlinx.coroutines.launch
  *
  * 通过 Chaquopy 在应用进程内启动内嵌的 ysp-live Python 服务，
  * 监听 127.0.0.1:8767，向本应用提供 /all.m3u 等央视/卫视直播源。
- * 移动端模式固定关闭设备协议（no_4k），4K/高码率频道自动回退 1080p，
- * 以保证在无 Node 运行时的环境下稳定可用。
+ * 使用 v20261124 内核：设备协议为纯 Python 实现（无需 Node），启用后
+ * 26 个高码率频道 + 4K/8K 可走设备源流畅播放；设备凭证从 assets 释放，
+ * 避免现场云注册失败。非设备频道以 bk 主路 + JCE 兜底，规避电视端僵死。
  */
 class YspLiveService : Service() {
     companion object {
@@ -58,14 +61,19 @@ class YspLiveService : Service() {
                     }
                     pythonStarted = true
                 }
+                // 将内置的已注册设备凭证（含 cloud_guid）释放到 data 目录，
+                // 供高码率设备协议免云注册直接激活；仅在文件不存在时释放，
+                // 避免覆盖内核后续写入的刷新状态。
+                copyDeviceCredentials()
+
                 val py = Python.getInstance()
                 val module = py.getModule("ysplive")
                 module.callAttr(
                     "start_server",
                     PORT,            // port
                     "127.0.0.1",     // bind
-                    true,            // no_4k（移动端关闭设备协议，4K 回退 1080p）
-                    true,            // no_engine（无 Node，不启动 WASM 伴生引擎）
+                    false,           // no_4k=false：启用设备协议，播放高码率/4K 频道
+                    true,            // no_engine（无 Node，设备协议为纯 Python，无需伴生引擎）
                     8787,            // engine_port
                     64,              // cache_mb
                     6,               // links_per_device
@@ -73,7 +81,7 @@ class YspLiveService : Service() {
                     10.0,            // timeout
                     filesDir.absolutePath, // data_dir
                 )
-                updateNotification("ysp-live 已就绪：央视/卫视 直播源本机服务 (端口 $PORT)")
+                updateNotification("ysp-live 已就绪：央视/卫视 + 高码率/4K 本机服务 (端口 $PORT)")
             } catch (e: Exception) {
                 updateNotification("ysp-live 启动失败：${e.message}")
             }
@@ -96,6 +104,30 @@ class YspLiveService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    /**
+     * 释放内置设备凭证到 filesDir。这些文件含已注册的 cloud_guid，
+     * 高码率设备协议据此直接激活，避免现场云注册失败（empty guid）。
+     * 只在目标不存在时写入，保留内核运行时更新的状态。
+     */
+    private fun copyDeviceCredentials() {
+        val names = arrayOf(
+            "device-state-rs.json",
+            "device-state-rs-slot1.json",
+            "device-state-rs-slot2.json",
+        )
+        for (name in names) {
+            try {
+                val target = File(filesDir, name)
+                if (target.exists()) continue
+                assets.open("ysp/$name").use { input ->
+                    FileOutputStream(target).use { out -> input.copyTo(out) }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "释放设备凭证 $name 失败: ${e.message}")
+            }
+        }
+    }
 
     private fun createNotificationChannel() {
         val channel = NotificationChannel(

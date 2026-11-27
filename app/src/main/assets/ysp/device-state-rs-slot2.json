@@ -1,0 +1,30 @@
+{
+  "cast_model": "XR-85Z9K",
+  "cloud_guid": "03F1E9AF-A7AC-4049-8F94-B7525EFF3DF9-RRBELVIICMHY",
+  "profile": {
+    "android_id": "095e02fc3e5da389",
+    "board": "mt5895",
+    "brand": "Sony",
+    "build_type": "user",
+    "device": "sony_xr_85z9k",
+    "display": "XR-85Z9K-user 13 SONYTV.2022.XR_85Z9K 2024 release-keys",
+    "fingerprint": "Sony/sony_xr_85z9k/sony_xr_85z9k:13/SONYTV.2022.XR_85Z9K/2024:user/release-keys",
+    "hardware": "mt5895",
+    "host": "sony-tv-build",
+    "mac": "32:99:c2:35:55:56",
+    "manufacturer": "Sony",
+    "model": "XR-85Z9K",
+    "product": "sony_xr_85z9k",
+    "report_model": "XR85Z9K",
+    "resolution": "7680*4320",
+    "tags": "release-keys",
+    "user": "build",
+    "version_id": "SONYTV.2022.XR_85Z9K"
+  },
+  "profile_source": "XR85Z9K",
+  "registered_at": 1792111743.9192326,
+  "schema_version": 1,
+  "screen_param": "7680-4320-280",
+  "updated_at": 1795670451.7655556,
+  "x_uid": "6DD95CB278915AE2B25BA0A00E1235652EEE23C4"
+}

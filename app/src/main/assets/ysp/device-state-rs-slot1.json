@@ -1,0 +1,30 @@
+{
+  "cast_model": "KD-85ZG9",
+  "cloud_guid": "B16D8787-B424-4AD5-94E7-9780DE909368-GLTKIWUMDJRQ",
+  "profile": {
+    "android_id": "33cd005092ef7ee2",
+    "board": "mt5893",
+    "brand": "Sony",
+    "build_type": "user",
+    "device": "sony_kd_85zg9",
+    "display": "KD-85ZG9-user 13 SONYTV.2019.KD_85ZG9 2024 release-keys",
+    "fingerprint": "Sony/sony_kd_85zg9/sony_kd_85zg9:13/SONYTV.2019.KD_85ZG9/2024:user/release-keys",
+    "hardware": "mt5893",
+    "host": "sony-tv-build",
+    "mac": "d6:01:42:1a:f0:da",
+    "manufacturer": "Sony",
+    "model": "KD-85ZG9",
+    "product": "sony_kd_85zg9",
+    "report_model": "KD85ZG9",
+    "resolution": "7680*4320",
+    "tags": "release-keys",
+    "user": "build",
+    "version_id": "SONYTV.2019.KD_85ZG9"
+  },
+  "profile_source": "KD85ZG9",
+  "registered_at": 1792040207.5891392,
+  "schema_version": 1,
+  "screen_param": "7680-4320-280",
+  "updated_at": 1795670445.0807335,
+  "x_uid": "2AB7387108AFF2A961CAA08AE15FCE26DF320991"
+}

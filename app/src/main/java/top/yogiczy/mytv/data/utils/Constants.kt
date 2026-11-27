@@ -10,9 +10,9 @@ object Constants {
     const val APP_TITLE = "我的电视"
 
     /**
-     * 应用 代码仓库
+     * 应用 代码仓库（TGYY 改造版）
      */
-    const val APP_REPO = "https://github.com/yaoxieyoulei/mytv-android"
+    const val APP_REPO = "https://github.com/PediyCCDebuger/mytv-android_TGYY"
 
     /**
      * IPTV源地址
@@ -36,15 +36,30 @@ object Constants {
     const val EPG_REFRESH_TIME_THRESHOLD = 2 // 不到2点不刷新
 
     /**
-     * Git最新版本信息
+     * Git最新版本信息（TGYY 改造版仓库）
      */
     const val GIT_RELEASE_LATEST_URL =
-        "https://api.github.com/repos/yaoxieyoulei/mytv-android/releases/latest"
+        "https://api.github.com/repos/PediyCCDebuger/mytv-android_TGYY/releases/latest"
 
     /**
-     * GitHub加速代理地址
+     * GitHub 下载代理：第一项为直连，其后为公共反向代理。
+     * 拼法为 https://<代理>/<原始 browser_download_url>。
+     * 用户可在「设置 → 更新 → 更新下载代理」中循环切换。
      */
-    const val GITHUB_PROXY = "https://mirror.ghproxy.com/"
+    val GITHUB_PROXIES = listOf(
+        "",                          // 直连
+        "gh-proxy.org",
+        "gh-proxy.com",
+        "ghfast.top",
+        "gh.acmsz.top",
+        "github.chenc.dev",
+        "gh.monlor.com",
+    )
+
+    /**
+     * GitHub加速代理地址（兼容旧引用；默认直连，运行时由偏好覆盖）
+     */
+    const val GITHUB_PROXY = ""
 
     /**
      * HTTP请求重试次数

@@ -20,6 +20,10 @@
 .cxx
 local.properties
 key.properties
+# 签名密钥：仓库只保留 .github/signing/release.keystore.b64（供 CI 固定签名），
+# 解码后的 jks 不入库，避免明文密钥泄露。
+*.jks
+!/.github/signing/release.keystore.b64
 # Python cache
 __pycache__/
 *.pyc

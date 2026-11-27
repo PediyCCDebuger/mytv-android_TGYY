@@ -1,5 +1,21 @@
 # 更新日志
 
+## [2.0.0] - 2026-11-27
+
+### 新增
+- 内置 ysp-live 内核升级到 v20261124：启用设备协议播放 26 个高码率频道与 4K/8K，不再强制回退 1080p
+- 高码率设备凭证（含已注册 cloud_guid）打包进 assets，启动时释放到 data 目录，免云注册直接激活
+- 设置 → 更新新增「更新下载代理」选项，可循环切换：直连 / gh-proxy.org / gh-proxy.com / ghfast.top / gh.acmsz.top / github.chenc.dev / gh.monlor.com
+- 更新检查仓库指向本改造版仓库，下载优先 universal 包
+
+### 优化
+- CI 改为固定签名 release 构建：密钥随仓库 base64 存放，每次构建同一签名，可直接覆盖升级；不再产出 debug 包
+- 1080p 频道在移动端以 bkliveinfo 为主路、JCE 兜底，规避电视端 JCE 空列表僵死 2004
+
+### 修复
+- 设备协议频道在 JCE 返回空 m3u8 时正确回退 bk 并切换 playlist 源，避免频道空白
+- 停用会因缺 secrets 恒失败且与主流程冲突的旧 release.yml
+
 ## [1.4.4] - 2024-08-15
 
 ### 优化

@@ -1,18 +1,18 @@
-name: Build APK
+name: Build Release APK
 
 on:
   push:
     branches: [main]
     tags: ['v*']
   workflow_dispatch:
-  pull_request:
-    branches: [main]
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,8 +23,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # GitHub runners 已预装 Android SDK 于 /usr/local/lib/android/sdk；无需 setup-android（该 action 会尝试安装已废弃的 "tools" 包而失败）
-      - name: Set up Android SDK (accept licenses + install platform/build-tools)
+      - name: Set up Android SDK
         run: |
           export ANDROID_HOME=/usr/local/lib/android/sdk
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
@@ -35,15 +34,42 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build debug APK (32-bit + 64-bit)
-        run: ./gradlew assembleDebug --no-daemon
+      # 固定签名：仓库内 .github/signing/release.keystore.b64 保证每次构建用同一把密钥，
+      # 老版本可被新版本直接覆盖升级（签名一致）。secrets 若配置则优先级更高。
+      - name: Restore fixed signing key
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.MYTV_KEYSTORE_BASE64 }}
+          SECRET_PASSWORD: ${{ secrets.MYTV_STORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+            echo "password=$SECRET_PASSWORD" >> "$GITHUB_OUTPUT"
+            echo "alias=mytv" >> "$GITHUB_OUTPUT"
+          elif [ -f .github/signing/release.keystore.b64 ]; then
+            base64 --decode .github/signing/release.keystore.b64 > "$RUNNER_TEMP/release.jks"
+            echo "password=mytv2026" >> "$GITHUB_OUTPUT"
+            echo "alias=mytv" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::No signing key found"
+            exit 1
+          fi
 
-      - name: Upload APK artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: mytv-android-apks
-          path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
+      - name: Build signed release APK (32-bit + 64-bit + universal)
+        env:
+          KEYSTORE: ${{ runner.temp }}/release.jks
+          KEYSTORE_PASSWORD: ${{ steps.signing.outputs.password }}
+          KEY_ALIAS: ${{ steps.signing.outputs.alias }}
+          KEY_PASSWORD: ${{ steps.signing.outputs.password }}
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Verify signatures
+        run: |
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner"
+          for apk in app/build/outputs/apk/release/*.apk; do
+            echo "--- $apk"
+            "$apksigner" verify --print-certs "$apk" | grep "SHA-256" | head -1
+          done
 
       - name: Extract release notes from tag annotation
         if: startsWith(github.ref, 'refs/tags/v')
@@ -53,8 +79,8 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -e
-          # actions/checkout 的浅克隆中 git tag --format='%(contents)' 读不到附注消息，
-          # 因此通过 API 获取：附注 tag 读 tag.message，轻量 tag 回退读 commit.message
+          # 浅克隆中 git tag --format 读不到附注，走 GitHub API：
+          # 附注 tag 读 tag.message，轻量 tag 回退读 commit.message
           AUTH="Authorization: Bearer $GH_TOKEN"
           TAG_SHA=$(curl -s -H "$AUTH" "https://api.github.com/repos/$REPO/git/ref/tags/$TAG" | python3 -c "import sys,json;print(json.load(sys.stdin)['object']['sha'])")
           TAG_MSG=$(curl -s -H "$AUTH" "https://api.github.com/repos/$REPO/git/tags/$TAG_SHA" | python3 -c "import sys,json;print(json.load(sys.stdin).get('message','') or '')")
@@ -66,14 +92,18 @@ jobs:
 
           ---
 
-          **APK 包说明**
-
-          - `app-armeabi-v7a-debug.apk`：32 位（armeabi-v7a），适用于老电视/部分盒子
-          - `app-arm64-v8a-debug.apk`：64 位（arm64-v8a），适用于新电视/手机
-          - `app-universal-debug.apk`：通用包，同时含 32/64 位，推荐直接安装
-
-          调试版已签名，可直接侧载安装。
+          **APK 包说明**（均为 release 签名，可直接覆盖升级）
+          - `app-universal-release.apk`：通用包（含 32/64 位），推荐
+          - `app-arm64-v8a-release.apk`：64 位（新电视/手机）
+          - `app-armeabi-v7a-release.apk`：32 位（老电视/盒子）
           EOF
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mytv-release-apks
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
 
       - name: Create GitHub Release on tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -81,6 +111,10 @@ jobs:
         with:
           name: MyTV YSP ${{ github.ref_name }}
           body_path: release_notes.txt
-          files: app/build/outputs/apk/debug/*.apk
+          files: app/build/outputs/apk/release/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"

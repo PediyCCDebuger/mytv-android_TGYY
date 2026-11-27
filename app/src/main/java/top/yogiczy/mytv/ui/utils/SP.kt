@@ -107,6 +107,9 @@ object SP {
         /** 更新强提醒（弹窗形式） */
         UPDATE_FORCE_REMIND,
 
+        /** 更新下载代理（域名，空串=直连） */
+        UPDATE_PROXY,
+
         /** ==================== 播放器 ==================== */
         /** 播放器 自定义ua */
         VIDEO_PLAYER_USER_AGENT,
@@ -260,6 +263,14 @@ object SP {
     var updateForceRemind: Boolean
         get() = sp.getBoolean(KEY.UPDATE_FORCE_REMIND.name, false)
         set(value) = sp.edit().putBoolean(KEY.UPDATE_FORCE_REMIND.name, value).apply()
+
+    /** 更新下载代理（域名，空串=直连；非法值回落直连） */
+    var updateProxy: String
+        get() {
+            val v = sp.getString(KEY.UPDATE_PROXY.name, "") ?: ""
+            return if (v in Constants.GITHUB_PROXIES) v else ""
+        }
+        set(value) = sp.edit().putString(KEY.UPDATE_PROXY.name, value).apply()
 
     /** ==================== 播放器 ==================== */
     /** 播放器 自定义ua */

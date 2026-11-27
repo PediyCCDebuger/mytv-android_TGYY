@@ -1,0 +1,30 @@
+{
+  "cast_model": "XR-75Z9J",
+  "cloud_guid": "D9319566-0EEA-4BED-96B3-1894C2836FE8-EEERVJXLWDSW",
+  "profile": {
+    "android_id": "47983e85cb1b72f2",
+    "board": "mt5895",
+    "brand": "Sony",
+    "build_type": "user",
+    "device": "sony_xr_75z9j",
+    "display": "XR-75Z9J-user 13 SONYTV.2021.XR_75Z9J 2024 release-keys",
+    "fingerprint": "Sony/sony_xr_75z9j/sony_xr_75z9j:13/SONYTV.2021.XR_75Z9J/2024:user/release-keys",
+    "hardware": "mt5895",
+    "host": "sony-tv-build",
+    "mac": "9a:43:3d:c2:33:f9",
+    "manufacturer": "Sony",
+    "model": "XR-75Z9J",
+    "product": "sony_xr_75z9j",
+    "report_model": "XR75Z9J",
+    "resolution": "7680*4320",
+    "tags": "release-keys",
+    "user": "build",
+    "version_id": "SONYTV.2021.XR_75Z9J"
+  },
+  "profile_source": "XR75Z9J",
+  "registered_at": 1795500571.3458543,
+  "schema_version": 1,
+  "screen_param": "7680-4320-260",
+  "updated_at": 1795670422.3574007,
+  "x_uid": "92C0C26C9F94944BCFF6311FEA173BBE5F59F855"
+}
