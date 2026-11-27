@@ -3382,42 +3382,44 @@ def wrap_bk_playlist_ts_urls (playlist :str ,base_url :str )->str :
             out .append (line )
     return '\n'.join (out )+'\n'
 def bk_refresh (ch ):
-    # 移动端鲁棒换取：bkliveinfo 既会返回需鉴权的 hlsliveali 节点（/proxy.ts 无签名头->500），
-    # 也会返回可裸连但偶发 HTTP 403 的 dtocnc 节点。故多轮换取+验证，任一地址真正拉到 #EXTM3U 才算成功。
-    global_flow_limiter .wait_slot ()
+    # bk m3u8 URL 带 svrtime 签名，有效期极短（实测约 1-2 秒！），
+    # 必须「生成后立即拉取」，绝不能缓存 URL 或在中间插入限流延迟，
+    # 否则 URL 到你手里时已过期 -> 403。
+    # 每轮都调 bk_playurls 拿全新地址，立刻用 curl/http.client 拉，全部地址都试。
     last_err =''
-    urls =list (ch .bk_urls )if (ch .bk_urls and time .time ()-ch .bk_urls_time <=BK_URL_TTL )else []
-    for attempt in range (4 ):
+    for attempt in range (6 ):
+        try :
+            urls =bk_urls_direct_safe (ch .sid ,ch .pid ,ch .defn )
+        except Exception as e :
+            last_err ='playurls: %s'%e 
+            continue
         if not urls :
+            continue
+        with ch .lock :
+            ch .bk_urls =urls 
+            ch .bk_urls_time =time .time ()
+        for u in urls :
+            # 立即拉取，不插入任何等待；优先 curl（最快、指纹最干净）
+            pl =None
             try :
-                urls =bk_urls_direct_safe (ch .sid ,ch .pid ,ch .defn )
-                ch .bk_urls =urls 
-                ch .bk_urls_time =time .time ()
-                log (f'[{ch .slug }] bkliveinfo 地址就绪 ({len (urls )} 个可裸连地址)',min_interval =60.0 )
-            except Exception as e :
-                last_err ='playurls: %s'%e 
-                urls =[]
-        for u in list (urls ):
-            try :
-                pl =fetch_abs_playlist (u )
-                if '#EXTM3U'not in pl :
-                    continue 
-                if MOBILE_BK_PRIMARY :
-                    pl =wrap_bk_playlist_ts_urls (pl ,u )
-                with ch .lock :
-                    ch .bk_playlist =pl 
-                    ch .last_error =''
-                return True 
-            except urllib .error .HTTPError as e :
-                last_err ='HTTPError: HTTP %s'%e .code 
+                if _curl_fetch_text is not None :
+                    pl =_curl_fetch_text (u ,{'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'*/*'},8 )
+            except Exception :
+                pl =None
+            if not pl or '#EXTM3U'not in pl :
+                try :
+                    pl ,_ =_http_fetch_text (u ,{'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'*/*'},8 )
+                except Exception as e :
+                    last_err ='fetch: %s'%str (e )[:50 ]
+                    pl =None
+            if not pl or '#EXTM3U'not in pl :
                 continue 
-            except Exception as e :
-                last_err ='%s: %s'%(type (e ).__name__ ,e )
-        # 本轮全部失败（多为空列表或 403），丢弃并重新换取；带小退避避免猛打上游
-        urls =[]
-        if attempt <3 :
-            time .sleep (0.3 * (attempt +1 ))
-            global_flow_limiter .wait_slot ()
+            if MOBILE_BK_PRIMARY :
+                pl =wrap_bk_playlist_ts_urls (pl ,u )
+            with ch .lock :
+                ch .bk_playlist =pl 
+                ch .last_error =''
+            return True 
     ch .bk_urls =[]
     ch .bk_urls_time =0 
     raise RuntimeError (last_err [:120 ]or 'bk playlist failed')
