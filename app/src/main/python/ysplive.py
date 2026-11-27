@@ -2681,6 +2681,7 @@ def _curl_fetch_text (url ,headers :dict ,timeout :float ):
                 exe =p 
                 break 
     if not exe :
+        log ('[网络] curl 兜底: 系统无 curl 可用',min_interval =30.0 )
         return None
     cmd =[exe ,'-sSL','--fail','--max-time',str (max (3 ,int (timeout )))]
     for k ,v in headers .items ():
@@ -2689,12 +2690,19 @@ def _curl_fetch_text (url ,headers :dict ,timeout :float ):
         cmd +=['-H',f'{k }: {v }']
     cmd .append (url )
     try :
-        r =subprocess .run (cmd ,capture_output =True ,timeout =timeout +6 )
-    except Exception :
+        # 不用 capture_output=True：Chaquopy 的 tempfile.TemporaryFile 在 __del__ 有 bug
+        # （'bytes' object has no attribute 'close'），显式 PIPE + DEVNULL 规避。
+        p =subprocess .Popen (cmd ,stdout =subprocess .PIPE ,stderr =subprocess .PIPE )
+        out ,err =p .communicate (timeout =timeout +6 )
+    except Exception as e :
+        log (f'[网络] curl 兜底调用失败: {str (e )[:60]}',min_interval =30.0 )
         return None
-    if r .returncode !=0 :
+    if p .returncode !=0 :
+        log (f'[网络] curl 兜底返回 {p .returncode}: {err .decode ("utf-8","replace")[:50]}',min_interval =30.0 )
         return None
-    return r .stdout .decode ('utf-8','replace')
+    text =out .decode ('utf-8','replace')
+    log (f'[网络] curl 兜底成功 ({len (text) } 字节)',min_interval =30.0 )
+    return text
 
 _catchup_url_cache :collections .OrderedDict [tuple [str ,int ,int ],tuple [str ,float ]] =collections .OrderedDict ()
 _catchup_cache_lock =threading .Lock ()
