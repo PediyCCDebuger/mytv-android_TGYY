@@ -28,7 +28,7 @@ object Constants {
      * 节目单XML地址
      */
     // 默认节目单：覆盖央视/卫视等国内频道；与 M3uIptvParser 用 tvg-id 匹配 display-name
-    const val EPG_XML_URL = "https://epg.136605.xyz/3days.xml"
+    const val EPG_XML_URL = "https://epg.136605.xyz/3days.xml.gz"
 
     /**
      * 节目单刷新时间阈值（小时）
@@ -84,7 +84,7 @@ object Constants {
     /**
      * 播放器加载超时
      */
-    const val VIDEO_PLAYER_LOAD_TIMEOUT = 1000L * 20 // 20秒
+    const val VIDEO_PLAYER_LOAD_TIMEOUT = 1000L * 30 // 30秒：内核冷拉最长15s+3次IO重试约9s，20s会误弹播放失败
 
     /**
      * 界面 超时未操作自动关闭界面

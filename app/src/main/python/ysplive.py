@@ -3633,7 +3633,7 @@ class Handler (BaseHTTPRequestHandler ):
             k4_val =qs .get ('k4',['0'])[0 ].lower ()
             only_4k =k4_val in ('1','true','yes')
             lines =[
-            '#EXTM3U url-tvg="https://epg.136605.xyz/3days.xml,https://epg.zsdc.eu.org/t.xml.gz" x-tvg-url="https://epg.136605.xyz/3days.xml"',
+            '#EXTM3U url-tvg="https://epg.136605.xyz/3days.xml.gz,https://epg.zsdc.eu.org/t.xml.gz" x-tvg-url="https://epg.136605.xyz/3days.xml.gz"',
             '#EXT-X-APTV-PREVIEW: FALSE',
             '#EXT-X-APTV-LATENCY: FALSE',
             '#EXT-X-APTV-LOGO: FALSE'
@@ -4117,6 +4117,64 @@ def main ():
 #   4. 服务端不依赖 Node/ysp-engine.js（no_engine 恒为 True），设备协议
 #      为纯 Python 实现，可在 Chaquopy 内直接运行。
 # ============================================================
+def warmup_channel (ch ):
+    """预热单个频道的 1080p/JCE 播放列表，供启动预热后台线程调用。
+    直接走 refresh_once + build_playlist（不等 coalesce 的事件），拉到数据立刻写入
+    last_built_playlist，这样用户首次切台能命中 60s 缓存而不是同步冷拉。"""
+    try :
+        with ch .lock :
+            if ch ._starting :
+                return False
+            ch ._starting =True
+            ch .last_access =time .time ()
+            ch .segments .clear ()
+            ch .order .clear ()
+            ch .seen_keys .clear ()
+            ch .last_pdt =''
+            ch .bk_playlist =''
+        try :
+            ok =refresh_once (ch ,is_foreground =False )
+            if ok :
+                build_playlist (ch ,holdback =True )
+        finally :
+            with ch .lock :
+                ch ._starting =False
+        with ch .lock :
+            has_data =bool (ch .segments or ch .bk_playlist )
+        if has_data and (ch .thread is None or not ch .thread .is_alive ()):
+            ch .thread =threading .Thread (target =refresh_loop ,args =(ch ,),daemon =True )
+            ch .thread .start ()
+        return has_data
+    except Exception :
+        try :
+            with ch .lock :
+                ch ._starting =False
+        except Exception :
+            pass
+        return False
+
+def warmup_all_channels ():
+    """启动后后台预热所有频道的播放列表：把冷拉成本从用户首次切台移到启动后台。
+    v1.0.10 有此机制，v2.0.0 换内核时丢失，导致“没看过的台首次切台要等十几秒甚至弹错”。
+    用受控并发（bk 有全局限流，4 路足够，避免一次性压垮上游）：
+    - 只预热 1080p/JCE 列表；高码率由 zap_debounce 停留后自动预取，不占用设备池。
+    - 空闲刷新循环有 IDLE_TIMEOUT 自动停止，不会常驻占资源。"""
+    def _run ():
+        time .sleep (1.5 )  # 让设备身份初始化 / 心跳先完成，避免抢占限流
+        chs =list (CHANNEL_MAP .values ())
+        log (f'[系统] 启动预热：后台预热 {len (chs) } 个频道的 1080p 播放列表…')
+        ok_cnt =0
+        try :
+            from concurrent .futures import ThreadPoolExecutor
+            with ThreadPoolExecutor (max_workers =4 ,thread_name_prefix ='ysp-warmup')as ex :
+                for r in ex .map (warmup_channel ,chs ):
+                    if r :
+                        ok_cnt +=1
+        except Exception as e :
+            log (f'[系统] 启动预热异常: {e }')
+        log (f'[系统] 启动预热完成：{ok_cnt }/{len (chs) } 个频道已就绪，首次切台可直接命中缓存')
+    threading .Thread (target =_run ,daemon =True ,name ='warmup').start ()
+
 def start_server (port =8767 ,bind ='127.0.0.1',no_4k =False ,no_engine =True ,engine_port =8787 ,cache_mb =64 ,links_per_device =6 ,zap_debounce =10.0 ,timeout =10.0 ,data_dir =''):
     """供 Android (Chaquopy) 调用：在后台线程启动 HTTP 服务，不阻塞调用方。"""
     global resolver ,server_port ,global_channel_dir ,global_ts_cache ,_ysp_srv ,MOBILE_BK_PRIMARY
@@ -4187,6 +4245,9 @@ def start_server (port =8767 ,bind ='127.0.0.1',no_4k =False ,no_engine =True ,e
     log (f'ysp-live (Android) 启动: {channels_count } 频道 (央视 {c_yangshi } / 卫视 {c_weishi }) 监听 {bind }:{port }')
     log (f'订阅: http://127.0.0.1:{port }/all.m3u  (诊断: /diag)')
     threading .Thread (target =_ysp_srv .serve_forever ,daemon =True ,name ='ysp-http').start ()
+    # 启动后台预热：v1.0.10 验证过、v2.0.0 换内核丢失的机制。
+    # 首次切台不用再同步冷拉 15s，改善“没看过的台慢/弹错、看过的台快”的体验差异。
+    warmup_all_channels ()
 
 def stop_server ():
     """停止后台 HTTP 服务。"""
