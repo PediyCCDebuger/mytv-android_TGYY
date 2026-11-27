@@ -1899,25 +1899,39 @@ def fetch_playlist_http1 (final_url :str ,playback_headers :dict ):
         if variant_request and parts[:2] != original_origin:
             headers = {k: v for k, v in headers.items() if k in ('Accept', 'Accept-Encoding', 'Connection', 'User-Agent')}
         headers ['Host']=host_header 
-        if is_https :
-            conn =http .client .HTTPSConnection (host ,port ,timeout =20 ,context =ssl .create_default_context ())
+        java_raw =None 
+        if _java_http () is not None :
+            # 设备源（高码率/4K）必须走系统 TLS：Python OpenSSL 指纹在盒子上被 CDN
+            # 判脚本稳定 403，走 http.client 等于必失败。
+            java_raw =_java_fetch_raw (current_url ,headers ,20.0 )
+        if java_raw is not None and java_raw [0 ]>0 :
+            status ,_jct ,_jtext ,_jfinal =java_raw 
+            loc =None 
+            content_type =_jct or 'application/vnd.apple.mpegurl'
+            body =_jtext .encode ('utf-8')
+            if _jfinal :
+                current_url =_jfinal 
         else :
-            conn =http .client .HTTPConnection (host ,port ,timeout =20 )
-        try :
+            # 桌面环境（无系统栈）或系统栈网络层失败时，回落 Python 直连一次
+            if is_https :
+                conn =http .client .HTTPSConnection (host ,port ,timeout =20 ,context =ssl .create_default_context ())
+            else :
+                conn =http .client .HTTPConnection (host ,port ,timeout =20 )
             try :
-                conn .request ('GET',target ,headers =headers )
-                resp =conn .getresponse ()
-            except Exception as e :
-                raise YsptpError (_normalize_network_error (e ))
-            status =resp .status 
-            loc =resp .getheader ('Location')
-            content_type =resp .getheader ('Content-Type')or 'application/vnd.apple.mpegurl'
-            try :
-                body =resp .read ()
-            except Exception as e :
-                raise YsptpError (_normalize_network_error (e ))
-        finally :
-            conn .close ()
+                try :
+                    conn .request ('GET',target ,headers =headers )
+                    resp =conn .getresponse ()
+                except Exception as e :
+                    raise YsptpError (_normalize_network_error (e ))
+                status =resp .status 
+                loc =resp .getheader ('Location')
+                content_type =resp .getheader ('Content-Type')or 'application/vnd.apple.mpegurl'
+                try :
+                    body =resp .read ()
+                except Exception as e :
+                    raise YsptpError (_normalize_network_error (e ))
+            finally :
+                conn .close ()
         if status in (301 ,302 ,303 ,307 ,308 )and loc :
             current_url =urllib .parse .urljoin (current_url ,loc )
             continue 
@@ -2554,12 +2568,82 @@ def _ckey (channel_id ):
     b64 =base64 .b64encode (enc ).decode ().replace ('+','_').replace ('/','-').rstrip ('=')
     return {'cKey':'--01'+b64 ,'guid':guid ,'ts':ts ,'flowId':'%s_%d'%(uuid .uuid4 ().hex .upper (),_CK_PLATFORM )}
 _BK_H264 =base64 .b64encode (b'H(30:1080,60:1080|30:1080,60:1080)').decode ()
-def bk_playurls (channel_id ,live_pid ,defn ='fhd'):
+
+# 取址全局限速：bkliveinfo/流媒体 CDN 对同一出口的高频请求会记失败，
+# 连续打满就会进入「返回成功但地址不可用」的软限流状态（实测过）。
+# 这里用全局最小间隔把并发取址摊平，宁可慢半秒也不要触发风控。
+_BK_SIGN_LOCK =threading .Lock ()
+_BK_SIGN_LAST =[0.0 ]
+_BK_SIGN_MIN_GAP =0.45 
+def _bk_sign_gate ():
+    with _BK_SIGN_LOCK :
+        gap =_BK_SIGN_MIN_GAP -(time .time ()-_BK_SIGN_LAST [0 ])
+        if gap >0 :
+            time .sleep (gap )
+        _BK_SIGN_LAST [0 ]=time .time ()
+def _bk_url_rank (u ):
+    """bk 播放地址优先级：主址 → 免鉴权节点 → 字母序兜底。"""
+    host =(url_host (u )or '').lower ()
+    backup =1 if host .startswith ('bk')else 0
+    signed =1 if live_playback_host_needs_signed_headers (host )else 0
+    return (backup ,signed ,u )
+
+# 取址诊断信息用线程局部存：全局变量会被后台刷新线程覆盖，导致
+# 「这条 URL 到底属于哪个频道」都判断不了。
+_BK_TLS =threading .local ()
+def _bk_diag_set (**kw ):
+    for k ,v in kw .items ():
+        setattr (_BK_TLS ,k ,v )
+def _bk_diag_get (name ,default =None ):
+    return getattr (_BK_TLS ,name ,default )
+# 取址（bkliveinfo）走哪条 TLS 栈：'py' = Python OpenSSL，'java' = 系统 OkHttp。
+# 两者 TLS 指纹不同，CDN 反爬可能对脚本指纹「不报错、只发无效地址」，需要实测定案。
+BK_SIGN_VIA ='py'
+def bk_playurls (channel_id ,live_pid ,defn ='fhd',via =None ,family =''):
+    _bk_sign_gate ()
     t =_ckey (channel_id )
     q =urllib .parse .urlencode ({'atime':'120','livepid':live_pid ,'cnlid':channel_id ,'appVer':_CK_APPVER ,'app_version':'300090','caplv':'1','cmd':'2','defn':defn ,'device':'iPhone','encryptVer':'4.2','getpreviewinfo':'0','hevclv':'0','lang':'zh-Hans_CN','livequeue':'0','logintype':'1','nettype':'1','newnettype':'1','newplatform':str (_CK_PLATFORM ),'platform':str (_CK_PLATFORM ),'sdtfrom':'v3021','spacode':'23','spaudio':'1','spdemuxer':'6','spdrm':'2','spdynamicrange':'1','spflv':'1','spflvaudio':'1','sphdrfps':'60','sphttps':'1','spvcode':_BK_H264 ,'spvideo':'4','stream':'1','system':'1','sysver':'ios18.2.1','uhd_flag':'0','cKey':t ['cKey'],'guid':t ['guid'],'fntick':str (t ['ts']),'flowid':t ['flowId'],'playbacktime':'0'})
-    req =urllib .request .Request ('https://bkliveinfo.ysp.cctv.cn/?'+q ,headers ={'User-Agent':'qqlive','Accept':'application/json'})
-    with urllib .request .urlopen (req ,timeout =5 )as r :
-        p =json .loads (r .read ().decode ())
+    url ='https://bkliveinfo.ysp.cctv.cn/?'+q 
+    _bk_diag_set (url =url )
+    hdrs ={'User-Agent':'qqlive','Accept':'application/json'}
+    t0 =time .time ()
+    body =None 
+    final_url =None 
+    mode =(via or BK_SIGN_VIA or 'py').lower ()
+    # 取址优先走 Python urllib：设备的 Python 走公网 IPv6 出口，实测经 IPv6 取回
+    # 的播放地址才有效（同一时刻经 IPv4 取回的一律 403）。urllib 失败再退回系统栈。
+    if mode !='java':
+        try :
+            req =urllib .request .Request (url ,headers =hdrs )
+            with urllib .request .urlopen (req ,timeout =6 )as r :
+                body =r .read ().decode ()
+                final_url =r .geturl ()
+        except Exception :
+            body =None 
+    if body is None and _java_http () is not None :
+        try :
+            body ,final_url =_java_fetch_text (url ,hdrs ,6.0 ,family )
+        except Exception :
+            body =None 
+    if final_url and final_url !=url :
+        # 参数被改写会导致服务端签出的地址不可用，必须记录
+        try :
+            _a =urllib .parse .parse_qs (urllib .parse .urlsplit (url ).query )
+            _b =urllib .parse .parse_qs (urllib .parse .urlsplit (final_url ).query )
+            _diff =[k for k in set (_a )|set (_b )if _a .get (k )!=_b .get (k )]
+            log (f'[网络] 取址 URL 被改写，差异参数: {_diff [:6 ]}',min_interval =5.0 )
+        except Exception :
+            pass 
+    elapsed =time .time ()-t0 
+    if elapsed >3.0 :
+        log (f'[网络] bkliveinfo 取址耗时 {elapsed :.1f}s（地址仅约 10s 有效，过慢会拿到过期地址）',min_interval =15.0 )
+    p =json .loads (body )
+    try :
+        _bk_diag_set (info ={k :p .get (k )for k in ('iretcode','livepid','cnlid','cdn_name','previewcnt','restpreviewcnt','playback','errinfo','extraInfo','vcode','vkey_renew_interval')},
+                      keys =sorted (p .keys ()),
+                      small ={k :v for k ,v in p .items ()if len (str (v ))<160 })
+    except Exception :
+        _bk_diag_set (info ={})
     if int (p .get ('iretcode',-1 ))!=0 :
         raise RuntimeError ('iretcode=%s %s'%(p .get ('iretcode'),p .get ('errinfo','')))
     urls =[]
@@ -2574,9 +2658,14 @@ def bk_playurls (channel_id ,live_pid ,defn ='fhd'):
     urls =[u for u in dict .fromkeys (urls )if u and '.cctv.'in u ]
     if not urls :
         raise RuntimeError ('no playurl')
-    urls .sort (key =lambda u :(0 if 'bklive-'in u else 1 ,u ))
+    # 排序规则来自实测（同一时刻、同一个可用 token）：
+    #   playurl = live-dtocnc-cdn      -> 200
+    #   backurl = bklive-dtocnc-cdn    -> 403
+    # 也就是说带 `bk` 前缀的是「备用」地址，对播放器是死的。原实现把 bklive-
+    # 排在最前面，等于每次刷新都先撞一遍死地址，白耗一轮还可能被风控记一次失败。
+    urls .sort (key =_bk_url_rank )
     return urls 
-def bk_urls_direct_safe (channel_id ,live_pid ,defn ='fhd',max_try =8):
+def bk_urls_direct_safe (channel_id ,live_pid ,defn ='fhd',max_try =2):
     """移动端：bkliveinfo 约 1/3 概率只返回 hlsliveali/liveten 节点，
     这类节点要求 APPID/APPSIGN/APPRANDOMSTR 鉴权头；移动端没有对应的设备签名头缓存，
     /proxy.ts 转发会报 missing cached signed playback headers -> 500，
@@ -2590,6 +2679,51 @@ def bk_urls_direct_safe (channel_id ,live_pid ,defn ='fhd',max_try =8):
             return urls
         urls =bk_playurls (channel_id ,live_pid ,defn )
     return urls
+def _probe_fetch (url ,via ,timeout =6.0 ,family =''):
+    """按指定 TLS 栈拉一次，返回 {status,elapsed_ms,body_head}。"""
+    hdrs ={'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'*/*'}
+    t0 =time .time ()
+    out ={'via':via ,'host':url_host (url )}
+    if via =='java':
+        try :
+            st ,_ct ,txt ,_fu =_java_fetch_raw (url ,hdrs ,timeout ,family )
+            out ['status']=st 
+            out ['body']=(txt or '')[:80 ]
+        except Exception as e :
+            out ['status']=-1 
+            out ['body']=str (e )[:80 ]
+    else :
+        try :
+            req =urllib .request .Request (url ,headers =hdrs )
+            with urllib .request .urlopen (req ,timeout =timeout )as r :
+                out ['status']=r .status 
+                out ['body']=r .read ()[:80 ].decode ('utf-8','replace')
+        except urllib .error .HTTPError as he :
+            out ['status']=he .code 
+            try :
+                out ['body']=he .read ()[:80 ].decode ('utf-8','replace')
+            except Exception :
+                pass 
+        except Exception as e :
+            out ['status']=-1 
+            out ['body']=str (e )[:80 ]
+    out ['elapsed_ms']=int ((time .time ()-t0 )*1000 )
+    return out 
+def _probe_round (sid ,pid ,defn ,sign_via ,family =''):
+    """取址一次 → 立即用两条栈各拉一次，返回整轮记录。"""
+    rep ={'sign':sign_via ,'family':family }
+    try :
+        urls =bk_playurls (sid ,pid ,defn ,via =sign_via ,family =family )
+    except Exception as e :
+        rep ['error']=str (e )[:100 ]
+        return rep 
+    rep ['urls']=[url_host (u )for u in urls ]
+    rep ['info']=_bk_diag_get ('info',{})
+    res =[]
+    for u in urls [:4 ]:
+        res .append ({'host':url_host (u ),'java':_probe_fetch (u ,'java')['status']})
+    rep ['fetch']=res 
+    return rep 
 def fetch_abs_playlist (url ,depth =0 ,headers :dict |None =None ,timeout :float =8.0 ):
     # 用 http.client 而非 urllib：bk CDN 的 nginx 会拦截 urllib 请求指纹返回 403，
     # 而 http.client 手动构造的请求头（Host/UA/Accept/Referer）实测可正常 200。
@@ -2613,10 +2747,148 @@ def fetch_abs_playlist (url ,depth =0 ,headers :dict |None =None ,timeout :float
         else :
             out .append (ln )
     return '\n'.join (out )
+# ============================================================
+# 系统 HTTP 栈（OkHttp）桥
+# ------------------------------------------------------------
+# 电视盒子实测：Python 标准库（OpenSSL TLS 指纹）请求央视/卫视 CDN 的 m3u8
+# 会被 nginx 反爬稳定判为脚本客户端并返回 403（每 5~10 秒刷新一次全部 403），
+# 播放列表因此拿不到，只能反复播陈旧缓存。
+# 桌面便携版能播是因为 Windows 自带 curl.exe（Schannel 指纹），Android 没有 curl。
+# 这里改由 Kotlin 侧 OkHttp（系统 Conscrypt 栈，与真实 App 指纹一致）代发请求。
+# ============================================================
+_JAVA_HTTP_BRIDGE =None 
+_JAVA_HTTP_INITED =False 
+
+def _java_http ():
+    """返回 Kotlin 侧 YspHttpBridge；桌面/无桥环境返回 None。"""
+    global _JAVA_HTTP_BRIDGE ,_JAVA_HTTP_INITED 
+    if _JAVA_HTTP_INITED :
+        return _JAVA_HTTP_BRIDGE 
+    _JAVA_HTTP_INITED =True 
+    try :
+        from java import jclass 
+        _JAVA_HTTP_BRIDGE =jclass ('top.yogiczy.mytv.net.YspHttpBridge')
+        log ('[网络] 已接入系统 HTTP 栈 (OkHttp)，播放列表改由系统 TLS 抓取')
+    except Exception as e :
+        _JAVA_HTTP_BRIDGE =None 
+        log (f'[网络] 系统 HTTP 栈不可用，回落 Python 直连: {str (e )[:60]}')
+    return _JAVA_HTTP_BRIDGE 
+
+def _java_fetch_raw (url ,headers ,timeout =8.0 ,family =''):
+    """系统 HTTP 栈请求，返回 (status, content_type, text, final_url)。
+    桥不可用返回 None；连不上返回 status=0。"""
+    bridge =_java_http ()
+    if bridge is None :
+        return None 
+    clean ={k :v for k ,v in (headers or {}).items ()if k .lower ()!='host'}
+    try :
+        payload =json .dumps (clean ,ensure_ascii =False )
+        res =bridge .fetch (url ,payload ,int (max (3.0 ,float (timeout ))*1000 ),'GET',family )
+    except Exception as e :
+        log (f'[网络] 系统 HTTP 栈调用异常: {str (e )[:80]}',min_interval =20.0 )
+        return None 
+    if res is None :
+        return None 
+    try :
+        status =int (res .status or 0 )
+        raw_body =res .body 
+        raw_body =bytes (raw_body )if raw_body is not None else b''
+        try :
+            text =raw_body .decode ('utf-8')
+        except UnicodeDecodeError :
+            # 上游的错误页多为 GBK（如"请求被拒绝"类中文页），用 gbk 再解一次
+            text =raw_body .decode ('gbk','replace')
+        final_url =res .finalUrl or url 
+        content_type =res .contentType or ''
+        err =res .error or ''
+        remote_ip =res .remoteIp or ''
+        jheaders =res .headers or ''
+        jelapsed =int (res .elapsedMs or 0 )
+        jattempts =int (res .attempts or 0 )
+        jsent_url =res .sentUrl or ''
+        jsent_hdrs =res .sentHeaders or ''
+    except Exception as e :
+        log (f'[网络] 系统 HTTP 栈结果解析失败: {str (e )[:60]}',min_interval =20.0 )
+        return None 
+    if status ==0 :
+        log (f'[网络] 系统 HTTP 栈请求失败: {str (err )[:80]}',min_interval =20.0 )
+    elif status not in (200 ,206 ):
+        # 把上游拒绝的具体地址与错误页标题打出来，便于定位：签名过期 / 节点风控 / DNS 选点
+        snip =text or ''
+        mt =re .search (r'<title[^>]*>(.*?)</title>',snip ,re .S |re .I )
+        if mt :
+            snip =re .sub (r'\s+',' ',mt .group (1 )).strip ()
+        else :
+            snip =re .sub (r'<[^>]+>',' ',snip )
+            snip =re .sub (r'\s+',' ',snip ).strip ()
+        _diff =''
+        if jsent_url and jsent_url !=url :
+            _diff =f' || 实发URL {jsent_url [-70 :]}'
+        log (f'[网络] 上游 {status } ({remote_ip }/{jattempts }节点) {url [-40 :]} | {jelapsed }ms | {jsent_hdrs [:150 ]}{_diff }',min_interval =4.0 )
+    return status ,content_type ,text ,final_url 
+
+def _java_fetch_text (url ,headers ,timeout =8.0 ,family =''):
+    """返回 (text, final_url)；桥不可用时返回 (None, None)。
+    上游明确返回非 2xx 时抛 HTTPError，避免调用方换别的方式重复请求、加重风控。"""
+    raw =_java_fetch_raw (url ,headers ,timeout ,family )
+    if raw is None :
+        return None ,None 
+    status ,_ct ,text ,final_url =raw 
+    if 200 <=status <300 :
+        return text ,final_url 
+    if status ==0 :
+        return None ,None 
+    raise urllib .error .HTTPError (url ,status ,http .client .responses .get (status ,'error'),None ,None )
+
+def _java_fetch_bytes (url ,headers ,timeout =20.0 ,range_header =None ,method ='GET'):
+    """系统 HTTP 栈取二进制（TS 分片），返回 (status, headers_dict, bytes)；
+    桥不可用返回 None。支持 Range 透传与 HEAD。"""
+    bridge =_java_http ()
+    if bridge is None :
+        return None 
+    clean ={k :v for k ,v in (headers or {}).items ()if k .lower ()not in ('host','range','content-length')}
+    if range_header :
+        clean ['Range']=range_header 
+    try :
+        payload =json .dumps (clean ,ensure_ascii =False )
+        res =bridge .fetch (url ,payload ,int (max (3.0 ,float (timeout ))*1000 ),method )
+    except Exception as e :
+        log (f'[网络] 分片请求异常: {str (e )[:80]}',min_interval =20.0 )
+        return None 
+    if res is None :
+        return None 
+    try :
+        status =int (res .status or 0 )
+        data =res .body 
+        data =bytes (data )if data is not None else b''
+        hdrs ={}
+        if res .contentType :
+            hdrs ['Content-Type']=str (res .contentType )
+        if res .contentRange :
+            hdrs ['Content-Range']=str (res .contentRange )
+        if res .acceptRanges :
+            hdrs ['Accept-Ranges']=str (res .acceptRanges )
+        if data :
+            hdrs ['Content-Length']=str (len (data ))
+    except Exception as e :
+        log (f'[网络] 分片结果解析失败: {str (e )[:60]}',min_interval =20.0 )
+        return None 
+    return status ,hdrs ,data 
+
 def _http_fetch_text (url ,headers :dict ,timeout :float =8.0 ,max_redirects =3 ):
-    """用 http.client 抓文本（m3u8），返回 (text, final_url)。
-    urllib.request 在部分 Android/Chaquopy 环境被 bk CDN 判为爬虫返回 403，
-    http.client 手动头可绕过。跟随重定向。"""
+    """抓文本（m3u8），返回 (text, final_url)。
+    Android 上优先系统 HTTP 栈（OkHttp，电视端唯一稳定路径）；桌面/无桥环境用
+    http.client，curl 仅作最后兜底。跟随重定向。"""
+    if _java_http() is not None:
+        # 系统栈可用时优先走它：Python OpenSSL 在盒子上必被 CDN 判脚本 403。
+        # 上游明确返回错误码时直接上抛（换栈重试只会加重风控）；
+        # 仅当系统栈在网络层就失败（DNS/连接）时，才回落下面的原生实现。
+        try:
+            text, final_url = _java_fetch_text(url, dict(headers) if headers else {}, timeout)
+        except urllib.error.HTTPError:
+            raise
+        if text is not None:
+            return text, (final_url or url)
     last_err =None
     cur =url 
     for _ in range (max_redirects ):
@@ -3387,7 +3659,7 @@ def bk_refresh (ch ):
     # 否则 URL 到你手里时已过期 -> 403。
     # 每轮都调 bk_playurls 拿全新地址，立刻用 curl/http.client 拉，全部地址都试。
     last_err =''
-    for attempt in range (6 ):
+    for attempt in range (3 ):
         try :
             urls =bk_urls_direct_safe (ch .sid ,ch .pid ,ch .defn )
         except Exception as e :
@@ -3399,19 +3671,23 @@ def bk_refresh (ch ):
             ch .bk_urls =urls 
             ch .bk_urls_time =time .time ()
         for u in urls :
-            # 立即拉取，不插入任何等待；优先 curl（最快、指纹最干净）
+            # 立即拉取，不插入任何等待。Android 上 _http_fetch_text 内部走系统
+            # HTTP 栈（OkHttp），桌面无桥时才回落 curl/http.client。
             pl =None
             try :
-                if _curl_fetch_text is not None :
-                    pl =_curl_fetch_text (u ,{'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'*/*'},8 )
-            except Exception :
+                pl ,_ =_http_fetch_text (u ,{'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'*/*'},8 )
+            except Exception as e :
+                last_err ='fetch: %s'%str (e )[:50 ]
+                # 播放地址有效期只有约 10 秒，打印地址年龄便于判断是不是"取址太慢导致过期"
+                _sv =query_param (u ,'svrtime')
+                if _sv :
+                    try :
+                        _age =time .time ()-float (_sv )
+                        if _age >5.0 :
+                            log (f'[{ch .slug }] 播放地址已存在 {_age :.1f}s（CDN 容忍约 10s）',min_interval =15.0 )
+                    except (TypeError ,ValueError ):
+                        pass 
                 pl =None
-            if not pl or '#EXTM3U'not in pl :
-                try :
-                    pl ,_ =_http_fetch_text (u ,{'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'*/*'},8 )
-                except Exception as e :
-                    last_err ='fetch: %s'%str (e )[:50 ]
-                    pl =None
             if not pl or '#EXTM3U'not in pl :
                 continue 
             if MOBILE_BK_PRIMARY :
@@ -3455,6 +3731,7 @@ def refresh_once (ch ,is_foreground :bool =False ):
         return False
     except Exception as e :
         ch .last_error =('%s: %s'%(type (e ).__name__ ,e ))[:120 ]
+        ch .last_fail_time =time .time ()
         log (f'[{ch .slug }] {defn_label (ch .defn )} 刷新异常: {ch .last_error }',min_interval =15.0 )
         return False 
 def refresh_loop (ch ):
@@ -3814,6 +4091,124 @@ class Handler (BaseHTTPRequestHandler ):
                 info .extend (clean_logs)
             self ._send (200 ,'\n'.join (info )+'\n',head_only =head_only )
             return 
+        if path =='/debug_ip':
+            # 诊断用：确认设备访问上游时的真实出口地址（IPv4 / IPv6 会完全改变
+            # CDN 的节点分配与签名校验结果）
+            out ={}
+            for tag ,fn in (('okhttp',lambda :_java_fetch_text ('https://ifconfig.me/ip',{'User-Agent':'curl/8.7'},8.0 )[0]),):
+                try :
+                    out [tag ]=(fn ()or '').strip ()
+                except Exception as e :
+                    out [tag ]='err:%s'%str (e )[:60 ]
+            try :
+                req =urllib .request .Request ('https://ifconfig.me/ip',headers ={'User-Agent':'curl/8.7'})
+                with urllib .request .urlopen (req ,timeout =8 )as r :
+                    out ['python']=r .read ().decode ().strip ()
+            except Exception as e :
+                out ['python']='err:%s'%str (e )[:60 ]
+            try :
+                out ['hosts']=sorted ({ai [4 ][0 ]for ai in socket .getaddrinfo ('live-dtocnc-cdn.ysp.cctv.cn',443 ,proto =socket .IPPROTO_TCP )})
+            except Exception as e :
+                out ['hosts']='err:%s'%str (e )[:60 ]
+            self ._send (200 ,json .dumps (out ,ensure_ascii =False )+'\n','application/json',head_only =head_only )
+            return 
+        if path =='/debug_url':
+            # 诊断用：只取址不请求，便于在另一台设备（同一出口）验证地址本身是否有效。
+            qs =urllib .parse .parse_qs (parts .query )
+            slug =normalize_channel (qs .get ('ch',['jsws'])[0 ]or 'jsws')
+            via =qs .get ('via',[None ])[0 ]
+            ch =CHANNEL_MAP .get (ALIAS_MAP .get (slug ,slug ))
+            if not ch :
+                self ._send (404 ,'unknown channel\n',head_only =head_only )
+                return 
+            try :
+                urls =bk_playurls (ch .sid ,ch .pid ,ch .defn ,via =via )
+                payload ={'channel':slug ,'via':via or BK_SIGN_VIA ,'ts':time .time (),'urls':urls ,'bkinfo_url':_bk_diag_get ('url','')or '' ,'info':_bk_diag_get ('info',{}),'keys':_bk_diag_get ('keys',[]),'small':_bk_diag_get ('small',{})}
+            except Exception as e :
+                payload ={'channel':slug ,'ts':time .time (),'error':str (e )[:200 ]}
+            self ._send (200 ,json .dumps (payload ,ensure_ascii =False )+'\n','application/json',head_only =head_only )
+            return 
+        if path =='/jce':
+            # 诊断用：强制走设备协议（JCE）解析一次，验证非设备频道能否也用高码率主路。
+            qs =urllib .parse .parse_qs (parts .query )
+            slug =normalize_channel (qs .get ('ch',['jsws'])[0 ]or 'jsws')
+            ch =CHANNEL_MAP .get (ALIAS_MAP .get (slug ,slug ))
+            if not ch :
+                self ._send (404 ,'unknown channel\n',head_only =head_only )
+                return 
+            t0 =time .time ()
+            try :
+                ok =jce_refresh (ch ,is_foreground =True )
+                err =''
+            except Exception as e :
+                ok =False 
+                err =('%s: %s'%(type (e ).__name__ ,e ))[:160 ]
+            pl =ch .jce_m3u8_url or ''
+            try :
+                text ,_fu =_http_fetch_text (pl ,{'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'*/*'},8.0 )if pl else ('',None )
+                head =(text or '')[:120 ].replace ('\n','|')
+            except Exception as e :
+                head ='fetch err %s'%str (e )[:60 ]
+            payload ={'channel':slug ,'ok':bool (ok ),'error':err ,'elapsed_ms':int ((time .time ()-t0 )*1000 ),
+                      'in_device_pool':slug in active_backend_channels ,'mode':ch .mode ,'url_host':url_host (pl ),'head':head }
+            self ._send (200 ,json .dumps (payload ,ensure_ascii =False )+'\n','application/json',head_only =head_only )
+            return 
+        if path =='/probe':
+            # 诊断用：对同一频道「当场取址 + 立即拉取」，四种组合（取址栈 × 拉取栈）
+            # 全在设备内部一次完成，避免 URL 10 秒有效期与跨设备干扰带来的误判。
+            qs =urllib .parse .parse_qs (parts .query )
+            slug =normalize_channel (qs .get ('ch',['jsws'])[0 ]or 'jsws')
+            ch =CHANNEL_MAP .get (ALIAS_MAP .get (slug ,slug ))
+            if not ch :
+                self ._send (404 ,'unknown channel\n',head_only =head_only )
+                return 
+            reps =[]
+            want =qs .get ('sign',[''])[0 ]
+            fam =qs .get ('fam',[''])[0 ]
+            for sign_via in ([want ]if want in ('py','java')else ['py','java']):
+                reps .append (_probe_round (ch .sid ,ch .pid ,ch .defn ,sign_via ,fam ))
+            self ._send (200 ,json .dumps (reps ,ensure_ascii =False )+'\n','application/json',head_only =head_only )
+            return 
+        if path =='/echo_fetch':
+            # 诊断用：拿设备自身去请求指定地址，返回状态码/耗时/入口 IP/正文首段。
+            # 用来分清「地址无效」与「这条 TLS 栈的请求被拒」——两者都表现为 403，
+            # 但只有把「取址栈」和「拉取栈」分离测试才能定案。
+            qs =urllib .parse .parse_qs (parts .query )
+            target =qs .get ('u',[''])[0 ]
+            if not target :
+                self ._send (400 ,'missing u\n',head_only =head_only )
+                return 
+            via =qs .get ('via',['py'])[0 ].lower ()
+            fam =qs .get ('fam',[''])[0 ]
+            hdrs ={'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'*/*'}
+            info ={'url':target [:120 ],'via':via }
+            t0 =time .time ()
+            if via =='java':
+                try :
+                    st ,_ct ,txt ,furl =_java_fetch_raw (target ,hdrs ,8.0 ,fam )
+                    info ['status']=st 
+                    info ['body']=(txt or '')[:4000 ]
+                except Exception as e :
+                    info ['error']=str (e )[:120 ]
+            else :
+                try :
+                    req =urllib .request .Request (target ,headers =hdrs )
+                    with urllib .request .urlopen (req ,timeout =8 )as r :
+                        info ['status']=r .status 
+                        info ['body']=r .read ()[:4000 ].decode ('utf-8','replace')
+                except urllib .error .HTTPError as he :
+                    info ['status']=he .code 
+                    try :
+                        raw =he .read ()[:400 ]
+                        m =re .search (rb'<title>(.*?)</title>',raw ,re .S |re .I )
+                        info ['body']=(m .group (1 ).decode ('gbk','replace')if m else raw [:120 ].decode ('utf-8','replace'))
+                    except Exception :
+                        pass 
+                except Exception as e :
+                    info ['error']=str (e )[:120 ]
+            info ['elapsed_ms']=int ((time .time ()-t0 )*1000 )
+            self ._send (200 ,json .dumps (info ,ensure_ascii =False )+'\n','application/json',head_only =head_only )
+            return 
         if path in ('/proxy.ts','/proxy'):
             token =proxy_ts_token (self .path )
             if not token :
@@ -3846,6 +4241,9 @@ class Handler (BaseHTTPRequestHandler ):
             except YsptpError as err :
                 self ._send (500 ,f'{err }\n',head_only =head_only )
                 return 
+            # 分片仍走 Python 直连：实测同一分片地址在电视上经系统 HTTP 栈（OkHttp）
+            # 反而被 CDN 回 403，而 Python http.client 能正常取到（v2.0.11 已验证可播）。
+            # 播放列表/取址才是 403 的根源，已在上面改成系统栈。
             try :
                 parts_url =urllib .parse .urlsplit (real_url )
                 host =parts_url .hostname 
@@ -3996,14 +4394,20 @@ class Handler (BaseHTTPRequestHandler ):
                 if cached_age >6.0 :
                     trigger_background_refresh (ch )
                 return 
-            # 陈旧播放列表兜底：刷新未就绪时先用上次列表顶上（<300s），后台继续刷新。
-            # 换台时不必干等鉴权/高码率解析，切台速度明显提升；v1.0.10 验证过的策略。
+            # 陈旧播放列表兜底：只容许极短窗口（20s）。
+            # 更旧的列表里分片大半已被 CDN 清理，喂给播放器只会“卡住—重播已缓存分片”
+            # 无限循环（用户明确反馈：宁愿看不了也不要一直重复播放），故宁可直接报错。
             stale_pl =ch .last_built_playlist 
             stale_age =now_ts -ch .last_built_time 
-            if stale_pl and '#EXTM3U'in stale_pl and stale_age <300.0 :
+            if stale_pl and '#EXTM3U'in stale_pl and stale_age <20.0 :
                 log (f'[{ch .slug }] 换台暂用上次播放列表 (已用 {stale_age :.0f}s)，后台刷新中',min_interval =10.0 )
                 trigger_background_refresh (ch )
                 self .send_live_playlist(ch, ch .last_built_source, stale_pl, head_only, cached=True )
+                return 
+            # 上游刚刚失败过（典型：CDN 返回 403 风暴）就不要让播放器干等 8 秒黑屏：
+            # 直接快速报错，让播放器/用户立刻换台或重试，几秒后再试会真正重连。
+            if now_ts -getattr (ch ,'last_fail_time',0 )<5.0 and ('403'in (ch .last_error or '')or '503'in (ch .last_error or '')):
+                self ._send (503 ,'频道 %s 上游暂时拒绝 (%s)，请稍后重试或换台\n'%(ch .name ,ch .last_error [:60 ]),head_only =head_only )
                 return 
             ch .register_client (self .connection )
             try :
@@ -4022,13 +4426,9 @@ class Handler (BaseHTTPRequestHandler ):
             if upstream_pl and '#EXTM3U'in upstream_pl :
                 self.send_live_playlist(ch, 'engine', upstream_pl, head_only)
                 return 
-            # 最后一次兜底：即使超过 300s，只要还有旧列表就先出画面，总比 503 黑屏好
-            if stale_pl and '#EXTM3U'in stale_pl :
-                log (f'[{ch .slug }] 刷新失败，沿用陈旧播放列表 ({stale_age :.0f}s) 兜底',min_interval =10.0 )
-                trigger_background_refresh (ch )
-                self .send_live_playlist(ch, ch .last_built_source, stale_pl, head_only, cached=True )
-                return 
-            self ._send (503 ,'频道 %s 暂无数据 (%s), 请稍后重试\n'%(ch .name ,ch .last_error or '拉取中'),head_only =head_only )
+            # 不再做“超过 20s 也硬塞旧列表”的兜底：那只会让播放器反复重播已缓存
+            # 分片、卡住再重播（用户明确拒绝该体验）。直接报错，让用户换台或重试。
+            self ._send (503 ,'频道 %s 源暂时不可用 (%s)，请稍后重试或换台\n'%(ch .name ,ch .last_error or '拉取中'),head_only =head_only )
             return 
         self ._send (404 ,'not found\n',head_only =head_only )
 def init_resolver ():
@@ -4253,9 +4653,10 @@ def warmup_channel (ch ):
                 ch ._starting =False
         with ch .lock :
             has_data =bool (ch .segments or ch .bk_playlist )
-        if has_data and (ch .thread is None or not ch .thread .is_alive ()):
-            ch .thread =threading .Thread (target =refresh_loop ,args =(ch ,),daemon =True )
-            ch .thread .start ()
+        # 预热只负责填一次缓存，不启动常驻刷新循环。
+        # 之前在这里给全部 64 个频道都开了 refresh_loop，于是每 10 秒就有上百次
+        # 「取址 + 拉列表」打向 CDN，一分钟后触发频率风控，全线变 403。
+        # 用户真正切到某频道时，ensure_channel() 才会为该频道单独启动刷新循环。
         return has_data
     except Exception :
         try :

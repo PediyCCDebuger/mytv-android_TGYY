@@ -19,3 +19,6 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# ---- Chaquopy 反射调用：Python 侧通过类名访问，不能被混淆/裁剪 ----
+-keep class top.yogiczy.mytv.net.YspHttpBridge { *; }
+-keep class top.yogiczy.mytv.net.YspHttpResult { *; }

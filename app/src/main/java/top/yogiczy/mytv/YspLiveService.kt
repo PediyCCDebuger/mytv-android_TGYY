@@ -77,7 +77,11 @@ class YspLiveService : Service() {
                     8787,            // engine_port
                     64,              // cache_mb
                     6,               // links_per_device
-                    10.0,            // zap_debounce
+                    0.0,             // zap_debounce=0：取消「先出 1080p」换台防抖
+                    // 1080p 备用通道（bk）在部分网络下会被上游稳定拒绝，
+                    // 而设备协议的高码率/4K 通道本身是好的。用户明确要求
+                    // 「只要能稳定播放高码率和 4K」，因此切台直接走高码率，
+                    // 不再先等一个可能永远失败的 1080p。
                     10.0,            // timeout
                     filesDir.absolutePath, // data_dir
                 )
