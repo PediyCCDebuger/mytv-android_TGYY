@@ -3253,6 +3253,29 @@ def jce_refresh (ch ,is_foreground :bool =False ):
     if is_init and added :
         log (f'[{ch .slug }] {defn_label (ch .defn )} 备用流缓冲就绪 ({len (ch .segments )} 片)')
     return True 
+def wrap_bk_playlist_ts_urls (playlist :str ,base_url :str )->str :
+    """移动端：把 bk 播放列表里的分片地址改写为本机 /proxy.ts。
+    播放器直连上游 CDN 时，电视/模拟器出口 IP 可能被风控返回 403；
+    改写后由本地内核用已注册的鉴权头请求上游，播放器只访问 127.0.0.1。"""
+    origin =f'http://127.0.0.1:{server_port }'
+    out =[]
+    for line in _rs_lines (playlist ):
+        stripped =line .strip ()
+        if not stripped or stripped .startswith ('#'):
+            out .append (line )
+            continue
+        try :
+            abs_url =urllib .parse .urljoin (base_url ,stripped )
+            parts =urllib .parse .urlsplit (abs_url )
+        except ValueError :
+            out .append (line )
+            continue
+        if is_ts_url (abs_url )and parts .scheme in ('http','https')and parts .netloc :
+            token =base64 .urlsafe_b64encode (abs_url .encode ('utf-8')).rstrip (b'=').decode ('ascii')
+            out .append (f"{origin }/proxy.ts?={token }")
+        else :
+            out .append (line )
+    return '\n'.join (out )+'\n'
 def bk_refresh (ch ):
     global_flow_limiter .wait_slot ()
     now =time .time ()
@@ -3267,6 +3290,8 @@ def bk_refresh (ch ):
                 pl =fetch_abs_playlist (u )
                 if '#EXTM3U'not in pl :
                     continue 
+                if MOBILE_BK_PRIMARY :
+                    pl =wrap_bk_playlist_ts_urls (pl ,u )
                 with ch .lock :
                     ch .bk_playlist =pl 
                     ch .last_error =''
