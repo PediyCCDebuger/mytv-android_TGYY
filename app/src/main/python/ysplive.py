@@ -4415,9 +4415,13 @@ class Handler (BaseHTTPRequestHandler ):
                 trigger_background_refresh (ch )
                 self .send_live_playlist(ch, ch .last_built_source, stale_pl, head_only, cached=True )
                 return 
-            # 上游刚刚失败过（典型：CDN 返回 403 风暴）就不要让播放器干等 8 秒黑屏：
-            # 直接快速报错，让播放器/用户立刻换台或重试，几秒后再试会真正重连。
-            if now_ts -getattr (ch ,'last_fail_time',0 )<20.0 and ('403'in (ch .last_error or '')or '503'in (ch .last_error or '')):
+            # 上游刚失败过（典型：CDN 返回 403 风暴）就别让播放器干等：
+            # 立即报错 + 后台再试一次。播放器收到 503 会自动重试，若后台这几秒内
+            # 拿到了新数据，下一次重试就直接出画面——比让用户干等十几秒好得多。
+            # 窗口取 60s：电视上的播放器重试间隔通常在数秒级，20s 窗口太短，
+            # 用户重试时往往已经出界，于是又白白等满一次冷拉超时。
+            if now_ts -getattr (ch ,'last_fail_time',0 )<60.0 and ('403'in (ch .last_error or '')or '503'in (ch .last_error or '')):
+                trigger_background_refresh (ch )
                 self ._send (503 ,'频道 %s 上游暂时拒绝 (%s)，请稍后重试或换台\n'%(ch .name ,ch .last_error [:60 ]),head_only =head_only )
                 return 
             ch .register_client (self .connection )
