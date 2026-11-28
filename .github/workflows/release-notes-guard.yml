@@ -1,0 +1,24 @@
+name: release-notes-guard
+
+# 发布说明脱敏守门：tag 附注会被 CI 当作 Release 说明公开，
+# 一旦含 IP / 设备型号 / 内网地址 / 测试环境描述就直接红灯。
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 读取 tag 附注
+        run: |
+          git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" > notes.txt
+          echo "----- 待校验内容 -----"
+          cat notes.txt
+
+      - name: 校验脱敏
+        run: bash scripts/check_release_notes.sh notes.txt
