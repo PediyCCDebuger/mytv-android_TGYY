@@ -1956,6 +1956,9 @@ def query_param (url :str ,name :str ):
         if key ==name :
             return value 
     return None 
+# 记录 https 分片被 CDN 反爬直接拒绝的 host：命中后该 host 的分片直接走 http，
+# 不再每次都先撞一次 403（一次 403 就是一次无效上游请求，也会累积风控计数）。
+_TS_HTTPS_BLOCKED =set ()
 def proxy_ts_token (url :str ):
     if '?'not in url :
         return None 
@@ -4252,34 +4255,73 @@ class Handler (BaseHTTPRequestHandler ):
             except YsptpError as err :
                 self ._send (500 ,f'{err }\n',head_only =head_only )
                 return 
-            # 分片仍走 Python 直连：实测同一分片地址在电视上经系统 HTTP 栈（OkHttp）
-            # 反而被 CDN 回 403，而 Python http.client 能正常取到（v2.0.11 已验证可播）。
-            # 播放列表/取址才是 403 的根源，已在上面改成系统栈。
+            # 分片转发：优先按 CDN 下发的原地址请求。
+            # 注意：ysp CDN 的部分边缘节点会把 Python/OpenSSL 的 TLS 指纹判为脚本客户端，
+            # 对 https 分片直接回 403（页面文案 "Invalid Request"）；同一地址改走 http、
+            # 或改走系统 OkHttp 都能正常取到分片。因此 https 收到 401/403/451 时自动降级到
+            # http 重试，并把该 host 记下来，后续分片直接走 http（省掉一次无效往返）。
             try :
                 parts_url =urllib .parse .urlsplit (real_url )
                 host =parts_url .hostname 
                 if not host :
                     self ._send (400 ,'invalid ts host\n',head_only =head_only )
                     return 
-                is_https =(parts_url .scheme =='https')
-                port =parts_url .port or (443 if is_https else 80 )
-                host_header =f'{host }:{parts_url .port }'if parts_url .port else host 
-                target =parts_url .path or '/'
-                if parts_url .query :
-                    target +='?'+parts_url .query 
                 extra ={}
                 if range_header :
                     extra ['Range']=header_value_clean (range_header )
                 headers =_playback_request_headers (playback_headers ,extra )
-                headers ['Host']=host_header 
-                if is_https :
-                    conn =http .client .HTTPSConnection (host ,port ,timeout =30 ,context =ssl .create_default_context ())
+                req_method ='HEAD'if head_only else 'GET'
+
+                def _open_ts (u ):
+                    p =urllib .parse .urlsplit (u )
+                    h =p .hostname 
+                    https =p .scheme =='https'
+                    pt =p .port or (443 if https else 80 )
+                    tgt =p .path or '/'
+                    if p .query :
+                        tgt +='?'+p .query 
+                    hd =dict (headers )
+                    hd ['Host']=f'{h }:{p .port }'if p .port else h 
+                    if https :
+                        c =http .client .HTTPSConnection (h ,pt ,timeout =30 ,context =ssl .create_default_context ())
+                    else :
+                        c =http .client .HTTPConnection (h ,pt ,timeout =30 )
+                    try :
+                        c .request (req_method ,tgt ,headers =hd )
+                        return c ,c .getresponse ()
+                    except Exception :
+                        try :
+                            c .close ()
+                        except Exception :
+                            pass 
+                        raise 
+
+                host_key =host .lower ()
+                alt_url ='http://'+real_url [8 :]if real_url .startswith ('https://')else None 
+                if alt_url and host_key in _TS_HTTPS_BLOCKED :
+                    conn ,resp =_open_ts (alt_url )
                 else :
-                    conn =http .client .HTTPConnection (host ,port ,timeout =30 )
+                    conn ,resp =_open_ts (real_url )
+                    if alt_url and resp .status in (401 ,403 ,451 ):
+                        try :
+                            conn .close ()
+                        except Exception :
+                            pass 
+                        conn2 ,resp2 =None ,None 
+                        try :
+                            conn2 ,resp2 =_open_ts (alt_url )
+                        except Exception :
+                            pass 
+                        if resp2 is not None and resp2 .status ==200 :
+                            conn ,resp =conn2 ,resp2 
+                            _TS_HTTPS_BLOCKED .add (host_key )
+                            log (f'[网络] {host } 的 https 分片被反爬拒绝，改用 http 拉取',min_interval =300.0 )
+                        elif conn2 is not None :
+                            try :
+                                conn2 .close ()
+                            except Exception :
+                                pass 
                 try :
-                    req_method ='HEAD'if head_only else 'GET'
-                    conn .request (req_method ,target ,headers =headers )
-                    resp =conn .getresponse ()
                     resp_headers_to_pass ={}
                     for k ,v in resp .getheaders ():
                         kl =k .lower ()
