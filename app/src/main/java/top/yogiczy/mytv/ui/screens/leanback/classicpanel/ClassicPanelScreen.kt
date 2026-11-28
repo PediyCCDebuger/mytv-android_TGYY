@@ -21,6 +21,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInParent
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
@@ -101,15 +104,24 @@ private fun LeanbackClassicPanelScreenWrapper(
     content: @Composable () -> Unit,
 ) {
     val childPadding = rememberLeanbackChildPadding()
+    // 面板实际占据的区域：点它之外才关闭面板
+    var panelBounds by remember { mutableStateOf(Rect.Zero) }
 
     Box(
         modifier = modifier
             .fillMaxSize()
-            .pointerInput(Unit) { detectTapGestures(onTap = { onClose() }) }
+            // 原来在内层再盖一层 detectTapGestures 把点击「吃掉」，避免点面板空白误关闭。
+            // 但那一层会把子内容（频道项）的点击一起吞掉——列表项不再持有焦点后尤其明显，
+            // 表现为鼠标点频道没反应。改为按坐标判断：只有点在面板之外才关闭。
+            .pointerInput(Unit) {
+                detectTapGestures { offset ->
+                    if (!panelBounds.contains(offset)) onClose()
+                }
+            }
     ) {
         Box(
             modifier = Modifier
-                .pointerInput(Unit) { detectTapGestures(onTap = { }) }
+                .onGloballyPositioned { panelBounds = it.boundsInParent() }
                 .padding(
                     top = childPadding.top,
                     start = childPadding.start,

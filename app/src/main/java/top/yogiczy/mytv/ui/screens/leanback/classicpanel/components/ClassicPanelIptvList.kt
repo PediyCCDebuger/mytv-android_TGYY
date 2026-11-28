@@ -3,6 +3,9 @@ package top.yogiczy.mytv.ui.screens.leanback.classicpanel.components
 import android.view.KeyEvent as AndroidKeyEvent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -42,6 +45,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -302,7 +307,24 @@ private fun LeanbackClassicPanelIptvItem(
         else MaterialTheme.colorScheme.onBackground
     ) {
         Box(
-            modifier = Modifier.clip(ListItemDefaults.shape().shape),
+            modifier = Modifier
+                .clip(ListItemDefaults.shape().shape)
+                // 点击选台由这一层统一接管：在 Initial 阶段取事件，
+                // 父级先于子级拿到指针，不受列表项内部点击实现（以及 canFocus=false）影响。
+                // 拿到 up 后 consume，保证同一次点击只触发一次。
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(
+                            requireUnconsumed = false,
+                            pass = PointerEventPass.Initial,
+                        )
+                        val up = waitForUpOrCancellation(pass = PointerEventPass.Initial)
+                        if (up != null) {
+                            up.consume()
+                            currentOnClick()
+                        }
+                    }
+                },
         ) {
             androidx.tv.material3.ListItem(
                 modifier = modifier
@@ -314,9 +336,8 @@ private fun LeanbackClassicPanelIptvItem(
                     selectedContainerColor = MaterialTheme.colorScheme.onBackground,
                 ),
                 selected = isSelected,
-                // 点击选台：v2.0.18 把焦点收归容器后这里被留成了空实现，
-                // 导致鼠标/触屏点选失效，现接回统一回调
-                onClick = { currentOnClick() },
+                // 点击由外层 pointerInput 在 Initial 阶段接管，这里保持空实现，避免一次点击走两条路径
+                onClick = { },
                 headlineContent = {
                     Text(
                         text = if (channelNo > 0)
