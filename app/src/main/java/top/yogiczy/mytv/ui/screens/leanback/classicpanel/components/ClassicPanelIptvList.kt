@@ -28,10 +28,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -230,6 +236,24 @@ fun LeanbackClassicPanelIptvList(
             .onPreviewKeyEvent { handleKeyEvent(it) }
             .fillMaxHeight()
             .width(220.dp)
+            // 视口底部总会有半露的下一项，直接裁切会让文字只剩一排笔画（像撒了粉）。
+            // 这里用 DstIn 做底部渐隐，半露内容柔和淡出到画面里。
+            .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+            .drawWithContent {
+                drawContent()
+                val h = size.height
+                if (h > 0f) {
+                    val fade = 56.dp.toPx().coerceAtMost(h)
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            0f to Color.Black,
+                            ((h - fade) / h).coerceIn(0.001f, 0.999f) to Color.Black,
+                            1f to Color.Transparent,
+                        ),
+                        blendMode = BlendMode.DstIn,
+                    )
+                }
+            }
             .background(MaterialTheme.colorScheme.background.copy(0.8f)),
     ) {
         itemsIndexed(iptvList, key = { _, iptv -> iptv.urlList.firstOrNull() ?: iptv.channelName }) { index, iptv ->
