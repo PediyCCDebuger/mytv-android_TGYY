@@ -21,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -263,6 +264,12 @@ fun LeanbackClassicPanelIptvList(
                 epgProgrammeCurrentProvider = { epgListProvider().currentProgrammes(iptv) },
                 isSelectedProvider = { index == selectedIndex },
                 showProgrammeProgressProvider = showProgrammeProgressProvider,
+                // 鼠标点击选台：先落光标再切台，键盘与鼠标共用同一套选中状态
+                onClick = {
+                    onUserAction()
+                    selectedIndex = index
+                    onIptvSelected(iptv)
+                },
             )
         }
     }
@@ -276,10 +283,13 @@ private fun LeanbackClassicPanelIptvItem(
     epgProgrammeCurrentProvider: () -> EpgProgrammeCurrent? = { null },
     isSelectedProvider: () -> Boolean = { false },
     showProgrammeProgressProvider: () -> Boolean = { false },
+    onClick: () -> Unit = {},
 ) {
     val iptv = iptvProvider()
     val channelNo = channelNoProvider()
     val isSelected = isSelectedProvider()
+    // 点击回调随重组变化（索引会变），用最新引用，避免手势协程里拿到旧闭包
+    val currentOnClick by rememberUpdatedState(onClick)
     // 用“分钟桶”作为记忆键：避免每次重组都扫描 EPG（解决打开/滚动卡顿），
     // 同时每分钟刷新一次“正在播放”，兼顾流畅与实时
     val minuteBucket = System.currentTimeMillis() / 60_000L
@@ -304,7 +314,9 @@ private fun LeanbackClassicPanelIptvItem(
                     selectedContainerColor = MaterialTheme.colorScheme.onBackground,
                 ),
                 selected = isSelected,
-                onClick = { },
+                // 点击选台：v2.0.18 把焦点收归容器后这里被留成了空实现，
+                // 导致鼠标/触屏点选失效，现接回统一回调
+                onClick = { currentOnClick() },
                 headlineContent = {
                     Text(
                         text = if (channelNo > 0)

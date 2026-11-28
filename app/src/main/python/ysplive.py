@@ -2596,9 +2596,11 @@ _BK_SOFT_WINDOWS =(60.0 ,180.0 ,480.0 ,900.0 )
 # 只有「多个不同频道在短时间内都被上游拒绝」才说明是出口整体被限制。
 # 单个频道被拒更可能是该频道的地址/节点问题，交给频道级冷却处理；
 # 若拿单频道失败直接全局停摆，一次网络抖动就会让所有频道都看不了。
+# 阈值取 3：曾出现「两个频道被拒、其余频道仍可正常播放」的情况，
+# 2 会造成误判，3 个不同频道在 2 分钟内都被拒才足以说明是整体受限。
 _BK_FAIL_CHANNELS ={}
 _BK_FAIL_CHANNEL_WINDOW =120.0 
-_BK_FAIL_CHANNEL_MIN =2 
+_BK_FAIL_CHANNEL_MIN =3 
 def _bk_soft_limited ():
     return time .time ()<_BK_SOFT_LIMIT ['until']
 def _bk_soft_limit_left ():
