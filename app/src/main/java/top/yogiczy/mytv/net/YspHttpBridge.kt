@@ -12,8 +12,11 @@ import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Proxy
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 一次上游 HTTP 请求的结果，字段全部 @JvmField 以便 Chaquopy 里的 Python 直接读取。
@@ -62,7 +65,7 @@ object YspHttpBridge {
     private const val MAX_BODY = 40 * 1024 * 1024
 
     /** 单次请求最多尝试的节点数。 */
-    private const val MAX_NODE_TRIES = 4
+    private const val MAX_NODE_TRIES = 6
 
     // 用 ThreadLocal：同步 call 的 EventListener 回调与 execute 在同一线程，
     // 而内核是多线程并发请求，共享字段会互相覆盖（诊断数据错乱）。
@@ -73,7 +76,7 @@ object YspHttpBridge {
     private val baseClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .protocols(listOf(Protocol.HTTP_1_1))
-            .connectTimeout(8, TimeUnit.SECONDS)
+            .connectTimeout(5, TimeUnit.SECONDS)
             .readTimeout(18, TimeUnit.SECONDS)
             .writeTimeout(18, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
@@ -96,13 +99,60 @@ object YspHttpBridge {
             .build()
     }
 
-    private fun clientFor(addr: InetAddress?): OkHttpClient {
-        if (addr == null) return baseClient
-        val pinned = object : Dns {
-            override fun lookup(hostname: String): List<InetAddress> = listOf(addr)
+    // 本机是否真的有可用的公网 IPv6。缓存 60 秒（换网/开关 IPv6 后最迟一分钟自愈）。
+    private val ipv6CheckedAt = AtomicLong(0)
+    private val ipv6Usable = AtomicBoolean(false)
+
+    /**
+     * 判断本机是否存在**可用的全局 IPv6 地址**。
+     *
+     * 为什么必须判断：域名（如 live-dtocnc-cdn.ysp.cctv.cn）同时有 A 和 AAAA 记录。
+     * 机顶盒重启光猫后可能拿不到 IPv6 前缀（实测 `ip -6 addr` 为空、`ping6` 报
+     * "Destination unreachable: Beyond scope of source address"），但 AAAA 记录照样
+     * 存在。此时若按 "有 AAAA 就优先 IPv6" 去请求，每个节点都会干等到连接超时，
+     * 表现为切台黑屏十几秒然后播放器报 2004。
+     */
+    private fun hasGlobalIpv6(): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - ipv6CheckedAt.get() < 60_000L) return ipv6Usable.get()
+        var found = false
+        try {
+            for (nif in NetworkInterface.getNetworkInterfaces()) {
+                if (!nif.isUp || nif.isLoopback) continue
+                for (addr in nif.inetAddresses) {
+                    if (addr is Inet6Address &&
+                        !addr.isLinkLocalAddress &&
+                        !addr.isLoopbackAddress &&
+                        !addr.isAnyLocalAddress
+                    ) {
+                        found = true
+                        break
+                    }
+                }
+                if (found) break
+            }
+        } catch (_: Exception) {
+            found = false
         }
-        // newBuilder 复用连接池/配置，开销很小
-        return baseClient.newBuilder().dns(pinned).build()
+        ipv6Usable.set(found)
+        ipv6CheckedAt.set(now)
+        return found
+    }
+
+    private fun clientFor(addr: InetAddress?, timeoutMs: Int = 0): OkHttpClient {
+        var builder = baseClient.newBuilder()
+        if (timeoutMs > 0) {
+            val ms = timeoutMs.toLong().coerceIn(2_000L, 15_000L)
+            builder = builder.connectTimeout(ms, TimeUnit.MILLISECONDS)
+        }
+        if (addr != null) {
+            val pinned = object : Dns {
+                override fun lookup(hostname: String): List<InetAddress> = listOf(addr)
+            }
+            // newBuilder 复用连接池/配置，开销很小
+            builder = builder.dns(pinned)
+        }
+        return builder.build()
     }
 
     private fun buildRequest(url: String, headersJson: String, method: String): Request? {
@@ -177,22 +227,26 @@ object YspHttpBridge {
     }
 
     /**
-     * 解析该 URL 的候选节点，**IPv6 优先**。
+     * 解析该 URL 的候选节点。
      *
-     * 这是实测出来的硬结论：同一时刻向 bkliveinfo 取址，经 IPv6 取回的地址请求 200，
-     * 经 IPv4 取回的地址请求 403（CDN 对 IPv4 客户端下发的是无效/降级地址）。
-     * 机顶盒有公网 IPv6，因此统一走 IPv6；无 IPv6 才退回 IPv4。
+     * 历史结论是「IPv6 取址返回的地址才有效」（同一时刻 IPv4 取址得到 403），
+     * 所以在有 IPv6 的环境里仍然 IPv6 优先。但**必须保留 IPv4 作为后备**：
+     * 之前写成 `if (v6.isNotEmpty()) v6 else v4`，只要 DNS 有 AAAA 就完全不试 IPv4，
+     * 于是盒子拿不到 IPv6 前缀时每个节点都卡到连接超时（实测 8s×2），
+     * 切台黑屏十几秒后才报错。
      */
     private fun resolveNodes(url: String, family: String = ""): List<InetAddress> {
         val host = url.toHttpUrlOrNull()?.host ?: return emptyList()
         return try {
             val all = Dns.SYSTEM.lookup(host)
-            val v6 = all.filterIsInstance<Inet6Address>()
-            val v4 = all.filterIsInstance<Inet4Address>()
+            val v6 = all.filterIsInstance<Inet6Address>().distinctBy { it.hostAddress }
+            val v4 = all.filterIsInstance<Inet4Address>().distinctBy { it.hostAddress }
             when (family.lowercase()) {
-                "v4", "4", "ipv4" -> v4.distinctBy { it.hostAddress }
-                "v6", "6", "ipv6" -> v6.distinctBy { it.hostAddress }
-                else -> (if (v6.isNotEmpty()) v6 else v4).distinctBy { it.hostAddress }
+                "v4", "4", "ipv4" -> v4
+                "v6", "6", "ipv6" -> v6
+                // 默认：本机真有全局 IPv6 才把 AAAA 节点排在前面；没有就直接只用 IPv4。
+                // 没 IPv6 时连 AAAA 节点纯属浪费（每个都要等到连接超时），干脆不试。
+                else -> if (hasGlobalIpv6()) v6 + v4 else v4
             }
         } catch (_: Exception) {
             emptyList()
@@ -222,14 +276,15 @@ object YspHttpBridge {
 
         val nodes = resolveNodes(url, family)
         if (nodes.isEmpty()) {
-            return execute(clientFor(null), request, isHead)
+            return execute(clientFor(null, timeoutMs), request, isHead)
         }
 
         var last: YspHttpResult? = null
         var tries = 0
         for (addr in nodes.take(MAX_NODE_TRIES)) {
             tries += 1
-            val r = execute(clientFor(addr), request, isHead)
+            // 逐节点重试时把连接超时压到传入值，避免坏节点把整体预算耗尽
+            val r = execute(clientFor(addr, timeoutMs), request, isHead)
             r.attempts = tries
             if (r.remoteIp.isBlank()) r.remoteIp = addr.hostAddress ?: ""
             if (r.ok || r.status in 300..399) return r
@@ -239,6 +294,6 @@ object YspHttpBridge {
             val worthRetry = r.status == 0 || r.status == 403 || r.status >= 500
             if (!worthRetry) return r
         }
-        return last ?: execute(clientFor(null), request, isHead)
+        return last ?: execute(clientFor(null, timeoutMs), request, isHead)
     }
 }

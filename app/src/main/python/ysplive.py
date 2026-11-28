@@ -3699,8 +3699,13 @@ def bk_refresh (ch ):
     ch .bk_urls =[]
     ch .bk_urls_time =0 
     raise RuntimeError (last_err [:120 ]or 'bk playlist failed')
-def refresh_once (ch ,is_foreground :bool =False ):
+def refresh_once (ch ,is_foreground :bool =False ,jce_only :bool =False ):
     try :
+        # jce_only：仅供启动预热使用。只解析设备协议（高码率/4K）频道，且失败不做
+        # bk 回退。原因：1080p 的 bk 通道在当前网络下稳定 403，预热它只会白烧请求、
+        # 积累风控（实测启动瞬间几十次 403 就是这么来的）。
+        if jce_only and (ch .slug not in active_backend_channels or ch .mode =='bk'):
+            return False 
         # 移动端：非设备频道统一以 bk 为主路（JCE 在电视端易返回空 m3u8），
         # 用模块级标志而非遍历缓存，保证懒加载创建的频道也生效。
         if MOBILE_BK_PRIMARY and ch .slug not in active_backend_channels :
@@ -3712,16 +3717,21 @@ def refresh_once (ch ,is_foreground :bool =False ):
             try :
                 ok =jce_refresh (ch ,is_foreground =is_foreground )
             except DeadHostError :
+                if jce_only :
+                    return False
                 ch .mode ='bk'
                 log (f'[{ch .slug }] JCE 域名受限，自动切换 bkliveinfo 备用通道',min_interval =10.0 )
                 ok =bk_refresh (ch )
             except Exception as jce_err :
                 # 移动端兜底：JCE 在电视端易被限/空 m3u8，任何失败都回退 bk，
                 # 避免高码率降级 1080p 时因 JCE 空列表僵死 2004。
-                if MOBILE_BK_PRIMARY :
+                if MOBILE_BK_PRIMARY and not jce_only :
                     log (f'[{ch .slug }] JCE 刷新失败({str (jce_err )[:40]})，回退 bkliveinfo',min_interval =10.0 )
                     ch .mode ='bk'  # build_playlist 依据 mode 取 bk_playlist
                     ok =bk_refresh (ch )
+                elif jce_only :
+                    # 预热阶段 JCE 不可用就放弃，不留 bk 请求（避免风控）
+                    return False 
                 else :
                     raise 
         if ok :
@@ -3771,11 +3781,11 @@ def ensure_channel (ch ):
             else :
                 return 
     if wait_only :
-        coalesce_refresh (ch .slug ,lambda :refresh_once (ch ,is_foreground =True ),timeout =15.0 )
+        coalesce_refresh (ch .slug ,lambda :refresh_once (ch ,is_foreground =True ),timeout =6.0 )
         return 
     try :
         if need_fetch :
-            coalesce_refresh (ch .slug ,lambda :refresh_once (ch ,is_foreground =True ),timeout =15.0 )
+            coalesce_refresh (ch .slug ,lambda :refresh_once (ch ,is_foreground =True ),timeout =6.0 )
         with ch .lock :
             has_data =bool (ch .segments or ch .bk_playlist )
         if thread_dead and has_data :
@@ -4117,12 +4127,13 @@ class Handler (BaseHTTPRequestHandler ):
             qs =urllib .parse .parse_qs (parts .query )
             slug =normalize_channel (qs .get ('ch',['jsws'])[0 ]or 'jsws')
             via =qs .get ('via',[None ])[0 ]
+            defn =qs .get ('defn',[''])[0 ]
             ch =CHANNEL_MAP .get (ALIAS_MAP .get (slug ,slug ))
             if not ch :
                 self ._send (404 ,'unknown channel\n',head_only =head_only )
                 return 
             try :
-                urls =bk_playurls (ch .sid ,ch .pid ,ch .defn ,via =via )
+                urls =bk_playurls (ch .sid ,ch .pid ,defn or ch .defn ,via =via )
                 payload ={'channel':slug ,'via':via or BK_SIGN_VIA ,'ts':time .time (),'urls':urls ,'bkinfo_url':_bk_diag_get ('url','')or '' ,'info':_bk_diag_get ('info',{}),'keys':_bk_diag_get ('keys',[]),'small':_bk_diag_get ('small',{})}
             except Exception as e :
                 payload ={'channel':slug ,'ts':time .time (),'error':str (e )[:200 ]}
@@ -4406,7 +4417,7 @@ class Handler (BaseHTTPRequestHandler ):
                 return 
             # 上游刚刚失败过（典型：CDN 返回 403 风暴）就不要让播放器干等 8 秒黑屏：
             # 直接快速报错，让播放器/用户立刻换台或重试，几秒后再试会真正重连。
-            if now_ts -getattr (ch ,'last_fail_time',0 )<5.0 and ('403'in (ch .last_error or '')or '503'in (ch .last_error or '')):
+            if now_ts -getattr (ch ,'last_fail_time',0 )<20.0 and ('403'in (ch .last_error or '')or '503'in (ch .last_error or '')):
                 self ._send (503 ,'频道 %s 上游暂时拒绝 (%s)，请稍后重试或换台\n'%(ch .name ,ch .last_error [:60 ]),head_only =head_only )
                 return 
             ch .register_client (self .connection )
@@ -4428,6 +4439,11 @@ class Handler (BaseHTTPRequestHandler ):
                 return 
             # 不再做“超过 20s 也硬塞旧列表”的兜底：那只会让播放器反复重播已缓存
             # 分片、卡住再重播（用户明确拒绝该体验）。直接报错，让用户换台或重试。
+            # 记下失败时刻：播放器/用户的下一次重试走快速失败分支，
+            # 不再每次都等满 6 秒（否则表现就是"黑屏好一会才报 2004"）。
+            ch .last_fail_time =time .time ()
+            if not ch .last_error :
+                ch .last_error ='上游未返回可用播放列表'
             self ._send (503 ,'频道 %s 源暂时不可用 (%s)，请稍后重试或换台\n'%(ch .name ,ch .last_error or '拉取中'),head_only =head_only )
             return 
         self ._send (404 ,'not found\n',head_only =head_only )
@@ -4629,7 +4645,7 @@ def main ():
 #   4. 服务端不依赖 Node/ysp-engine.js（no_engine 恒为 True），设备协议
 #      为纯 Python 实现，可在 Chaquopy 内直接运行。
 # ============================================================
-def warmup_channel (ch ):
+def warmup_channel (ch ,jce_only :bool =False ):
     """预热单个频道的 1080p/JCE 播放列表，供启动预热后台线程调用。
     直接走 refresh_once + build_playlist（不等 coalesce 的事件），拉到数据立刻写入
     last_built_playlist，这样用户首次切台能命中 60s 缓存而不是同步冷拉。"""
@@ -4645,7 +4661,7 @@ def warmup_channel (ch ):
             ch .last_pdt =''
             ch .bk_playlist =''
         try :
-            ok =refresh_once (ch ,is_foreground =False )
+            ok =refresh_once (ch ,is_foreground =False ,jce_only =jce_only )
             if ok :
                 build_playlist (ch ,holdback =True )
         finally :
@@ -4667,25 +4683,32 @@ def warmup_channel (ch ):
         return False
 
 def warmup_all_channels ():
-    """启动后后台预热所有频道的播放列表：把冷拉成本从用户首次切台移到启动后台。
-    v1.0.10 有此机制，v2.0.0 换内核时丢失，导致“没看过的台首次切台要等十几秒甚至弹错”。
-    用受控并发（bk 有全局限流，4 路足够，避免一次性压垮上游）：
-    - 只预热 1080p/JCE 列表；高码率由 zap_debounce 停留后自动预取，不占用设备池。
-    - 空闲刷新循环有 IDLE_TIMEOUT 自动停止，不会常驻占资源。"""
+    """启动后**少量**预热高码率频道的播放列表。
+
+    历史教训：早先这里把全部 64 个频道丢进 4 并发预热，每个频道要 3 轮×2 次取址
+    再拉列表，启动十几秒内就向上游打出去几百次请求；而 1080p 的 bk 通道在当前
+    网络下稳定 403，等于纯粹烧请求换风控（实测启动 11 秒内 40+ 条 403）。
+    现在只预热设备协议频道（高码率/4K），限量 8 个、串行、每个间隔 1 秒，
+    失败也不回退 bk；其余频道一律等用户切台时按需解析。"""
     def _run ():
-        time .sleep (1.5 )  # 让设备身份初始化 / 心跳先完成，避免抢占限流
-        chs =list (CHANNEL_MAP .values ())
-        log (f'[系统] 启动预热：后台预热 {len (chs) } 个频道的 1080p 播放列表…')
+        # 必须等设备协议引擎真的就绪再预热。之前固定 sleep 1.5s 就开跑，而引擎
+        # 要 4 秒左右才激活，结果预热里每次 JCE 都失败、又回退 bk 打出一串 403。
+        for _ in range(80):
+            if resolver_ready():
+                break
+            time .sleep (0.5)
+        time .sleep (0.5)
+        chs =[c for c in CHANNEL_MAP .values ()if c .slug in active_backend_channels and c .mode !='bk'][:8 ]
+        log (f'[系统] 启动预热：{len (chs) } 个高码率频道（仅设备协议，串行）…')
         ok_cnt =0
-        try :
-            from concurrent .futures import ThreadPoolExecutor
-            with ThreadPoolExecutor (max_workers =4 ,thread_name_prefix ='ysp-warmup')as ex :
-                for r in ex .map (warmup_channel ,chs ):
-                    if r :
-                        ok_cnt +=1
-        except Exception as e :
-            log (f'[系统] 启动预热异常: {e }')
-        log (f'[系统] 启动预热完成：{ok_cnt }/{len (chs) } 个频道已就绪，首次切台可直接命中缓存')
+        for c in chs :
+            try :
+                if warmup_channel (c ,jce_only =True ):
+                    ok_cnt +=1
+            except Exception :
+                pass
+            time .sleep (1.0 )
+        log (f'[系统] 启动预热完成：{ok_cnt }/{len (chs) } 个高码率频道已就绪')
     threading .Thread (target =_run ,daemon =True ,name ='warmup').start ()
 
 def start_server (port =8767 ,bind ='127.0.0.1',no_4k =False ,no_engine =True ,engine_port =8787 ,cache_mb =64 ,links_per_device =6 ,zap_debounce =10.0 ,timeout =10.0 ,data_dir =''):
