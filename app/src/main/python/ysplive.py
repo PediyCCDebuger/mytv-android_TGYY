@@ -1740,17 +1740,22 @@ class Resolver :
                 self .record_recoverable_error (str (err ))
                 with self .state_lock :
                     cached =self .state .playlist_cache .get (entry .channel )
-                if cached and (now_f64 ()-cached .cached_at <20.0 ):
+                stale_window =300.0 if _bk_soft_limited ()else 20.0 
+                if cached and (now_f64 ()-cached .cached_at <stale_window ):
                     return (cached .body ,cached .content_type ,miss_probe )
                 raise 
             if not 200 <=status <300 :
                 err =YsptpError (f'upstream m3u8 HTTP {status }: {text [:300 ]}')
                 self .record_recoverable_error (str (err ))
                 if status in (401 ,403 ,451 ):
-                    _bk_note_soft_limit ()
+                    # 传入频道名：单频道被拒不进全局静默，由频道级冷却处理
+                    _bk_note_soft_limit (entry .channel )
                 with self .state_lock :
                     cached =self .state .playlist_cache .get (entry .channel )
-                if cached and (now_f64 ()-cached .cached_at <20.0 ):
+                # 静默期内放宽陈旧列表的兜底窗口：正在看的频道不会因为
+                # 取址被临时限制而立刻黑屏，等限制解除再拿新地址。
+                stale_window =300.0 if _bk_soft_limited ()else 20.0 
+                if cached and (now_f64 ()-cached .cached_at <stale_window ):
                     return (cached .body ,cached .content_type ,miss_probe )
                 raise err 
             self .clear_recoverable_error_count ()
@@ -2585,9 +2590,15 @@ _BK_SIGN_MIN_GAP =0.45
 # 这个出口已经被记进风控。此时继续请求只会加深限制、延长恢复时间，所以进入静默期，
 # 期间直接快速失败，不再向上游取址。
 _BK_SOFT_LIMIT ={'fails':0 ,'until':0.0 ,'last':0.0 ,'level':0 }
-# 静默期逐级加长：上游对这种限制不是几秒就解除的，固定 3 分钟只会在
-# 每次到期后立刻再撞一次，等于持续提醒对方「这个出口还在刷」，恢复被拖得更久。
-_BK_SOFT_WINDOWS =(180.0 ,600.0 ,1800.0 )
+# 静默期从 1 分钟起步，逐级加长：偶发问题 1 分钟就能自愈，
+# 真的被上游限制时再逐步拉长（3 → 8 → 15 分钟上限），任何一次成功立即归零。
+_BK_SOFT_WINDOWS =(60.0 ,180.0 ,480.0 ,900.0 )
+# 只有「多个不同频道在短时间内都被上游拒绝」才说明是出口整体被限制。
+# 单个频道被拒更可能是该频道的地址/节点问题，交给频道级冷却处理；
+# 若拿单频道失败直接全局停摆，一次网络抖动就会让所有频道都看不了。
+_BK_FAIL_CHANNELS ={}
+_BK_FAIL_CHANNEL_WINDOW =120.0 
+_BK_FAIL_CHANNEL_MIN =2 
 def _bk_soft_limited ():
     return time .time ()<_BK_SOFT_LIMIT ['until']
 def _bk_soft_limit_left ():
@@ -2595,27 +2606,29 @@ def _bk_soft_limit_left ():
 def _bk_soft_limit_blocked ():
     # 供上层判断「当前是出口被限制」而不是频道本身不可用
     return _bk_soft_limited ()
-def _bk_note_soft_limit ():
+def _bk_note_soft_limit (channel =''):
     now =time .time ()
     if now <_BK_SOFT_LIMIT ['until']:
         return 
-    # 计数带时间窗：距上次失败超过 2 分钟就重新计，避免偶发 403 累积成误判；
-    # 成功回退其它通道不清零，否则「失败一次、回退成功」会永远攒不够阈值。
-    if now -_BK_SOFT_LIMIT ['last']>120.0 :
-        _BK_SOFT_LIMIT ['fails']=0 
-    _BK_SOFT_LIMIT ['last']=now 
-    _BK_SOFT_LIMIT ['fails']=_BK_SOFT_LIMIT ['fails']+1 
-    if _BK_SOFT_LIMIT ['fails']>=3 :
-        _BK_SOFT_LIMIT ['fails']=0 
-        lvl =min (_BK_SOFT_LIMIT ['level'],len (_BK_SOFT_WINDOWS )-1 )
-        wait =_BK_SOFT_WINDOWS [lvl ]
-        _BK_SOFT_LIMIT ['level']=lvl +1 
-        _BK_SOFT_LIMIT ['until']=now +wait 
-        log ('[网络] 上游连续返回不可用地址，静默 %d 分钟，暂停取址以免加深限制'%(int (wait /60 )),min_interval =30.0 )
+    if channel :
+        _BK_FAIL_CHANNELS [channel ]=now 
+    # 只统计最近 2 分钟内的拒绝，过期的自动清掉，避免几分钟内零散的偶发失败累积成误判
+    for k ,ts in list (_BK_FAIL_CHANNELS .items ()):
+        if now -ts >_BK_FAIL_CHANNEL_WINDOW :
+            _BK_FAIL_CHANNELS .pop (k ,None )
+    if len (_BK_FAIL_CHANNELS )<_BK_FAIL_CHANNEL_MIN :
+        return 
+    _BK_FAIL_CHANNELS .clear ()
+    lvl =min (_BK_SOFT_LIMIT ['level'],len (_BK_SOFT_WINDOWS )-1 )
+    wait =_BK_SOFT_WINDOWS [lvl ]
+    _BK_SOFT_LIMIT ['level']=lvl +1 
+    _BK_SOFT_LIMIT ['until']=now +wait 
+    log ('[网络] 多个频道被上游拒绝，静默 %d 秒，暂停取址以免加深限制'%int (wait ),min_interval =30.0 )
 def _bk_clear_soft_limit ():
-    # 仅在真正取到可用播放列表时调用：计数交给时间窗自然衰减，
-    # 但退避层级要归零——已经恢复了，下一次失败应从最短静默重新开始。
-    _BK_SOFT_LIMIT ['last']=time .time ()
+    # 仅在真正取到可用播放列表时调用：已经恢复，退避层级与待确认的失败频道一并清零，
+    # 下一次若再触发，仍从最短静默（1 分钟）重新开始。
+    _BK_FAIL_CHANNELS .clear ()
+    _BK_SOFT_LIMIT ['fails']=0 
     _BK_SOFT_LIMIT ['level']=0 
 def _bk_sign_gate ():
     with _BK_SIGN_LOCK :
@@ -2646,7 +2659,7 @@ BK_SIGN_VIA ='py'
 _BK_SIGN_FAMILY =['4']
 def bk_playurls (channel_id ,live_pid ,defn ='fhd',via =None ,family =''):
     if _bk_soft_limited ():
-        raise YsptpError (f'上游限流静默期，{_bk_soft_limit_left ()} 秒后再试')
+        raise YsptpError (f'上游暂不可用，{_bk_soft_limit_left ()} 秒后自动重试')
     _bk_sign_gate ()
     t =_ckey (channel_id )
     q =urllib .parse .urlencode ({'atime':'120','livepid':live_pid ,'cnlid':channel_id ,'appVer':_CK_APPVER ,'app_version':'300090','caplv':'1','cmd':'2','defn':defn ,'device':'iPhone','encryptVer':'4.2','getpreviewinfo':'0','hevclv':'0','lang':'zh-Hans_CN','livequeue':'0','logintype':'1','nettype':'1','newnettype':'1','newplatform':str (_CK_PLATFORM ),'platform':str (_CK_PLATFORM ),'sdtfrom':'v3021','spacode':'23','spaudio':'1','spdemuxer':'6','spdrm':'2','spdynamicrange':'1','spflv':'1','spflvaudio':'1','sphdrfps':'60','sphttps':'1','spvcode':_BK_H264 ,'spvideo':'4','stream':'1','system':'1','sysver':'ios18.2.1','uhd_flag':'0','cKey':t ['cKey'],'guid':t ['guid'],'fntick':str (t ['ts']),'flowid':t ['flowId'],'playbacktime':'0'})
@@ -3739,15 +3752,23 @@ def bk_refresh (ch ):
         with ch .lock :
             ch .bk_urls =urls 
             ch .bk_urls_time =time .time ()
+        # 记录本轮是否「所有地址都被上游明确拒绝」：是则说明重取新地址也没用，
+        # 直接结束，不再走后面的轮次——省下请求，也避免持续提醒对方。
+        rejected_all =True 
         for u in urls :
             # 立即拉取，不插入任何等待。Android 上 _http_fetch_text 内部走系统
             # HTTP 栈（OkHttp），桌面无桥时才回落 curl/http.client。
             pl =None
+            rejected =False 
             try :
                 # 拉取沿用取址时用的地址族：上游把签权绑在取址源族上，错配必 403。
                 pl ,_ =_http_fetch_text (u ,{'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'*/*'},8 ,family =_BK_SIGN_FAMILY [0 ])
             except Exception as e :
-                last_err ='fetch: %s'%str (e )[:50 ]
+                err_txt =str (e )
+                # 401/403/451 是上游明确拒绝，重试同一频道只会重复被拒；
+                # 超时、连接中断这类网络故障则保留原有的多轮重试。
+                rejected =('HTTP 403'in err_txt or 'HTTP 401'in err_txt or 'HTTP 451'in err_txt )
+                last_err ='fetch: %s'%err_txt [:50 ]
                 # 播放地址有效期只有约 10 秒，打印地址年龄便于判断是不是"取址太慢导致过期"
                 _sv =query_param (u ,'svrtime')
                 if _sv :
@@ -3759,6 +3780,8 @@ def bk_refresh (ch ):
                         pass 
                 pl =None
             if not pl or '#EXTM3U'not in pl :
+                if not rejected :
+                    rejected_all =False 
                 continue 
             if MOBILE_BK_PRIMARY :
                 pl =wrap_bk_playlist_ts_urls (pl ,u )
@@ -3766,6 +3789,9 @@ def bk_refresh (ch ):
                 ch .bk_playlist =pl 
                 ch .last_error =''
             return True 
+        if urls and rejected_all :
+            log (f'[{ch .slug }] 播放列表被上游明确拒绝，跳过本轮重试',min_interval =10.0 )
+            break 
     ch .bk_urls =[]
     ch .bk_urls_time =0 
     raise RuntimeError (last_err [:120 ]or 'bk playlist failed')
