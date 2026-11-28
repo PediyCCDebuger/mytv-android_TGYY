@@ -1746,12 +1746,15 @@ class Resolver :
             if not 200 <=status <300 :
                 err =YsptpError (f'upstream m3u8 HTTP {status }: {text [:300 ]}')
                 self .record_recoverable_error (str (err ))
+                if status in (401 ,403 ,451 ):
+                    _bk_note_soft_limit ()
                 with self .state_lock :
                     cached =self .state .playlist_cache .get (entry .channel )
                 if cached and (now_f64 ()-cached .cached_at <20.0 ):
                     return (cached .body ,cached .content_type ,miss_probe )
                 raise err 
             self .clear_recoverable_error_count ()
+            _bk_clear_soft_limit ()
             body =self .proxy_playlist_ts_urls (text ,proxy_origin ,proxy_prefix )
             if float (self .args .playlist_cache_ttl )>0.0 :
                 now =now_f64 ()
@@ -2578,6 +2581,42 @@ _BK_H264 =base64 .b64encode (b'H(30:1080,60:1080|30:1080,60:1080)').decode ()
 _BK_SIGN_LOCK =threading .Lock ()
 _BK_SIGN_LAST =[0.0 ]
 _BK_SIGN_MIN_GAP =0.45 
+# 上游软限流状态：bkliveinfo 会「取址成功、但返回的地址一律 403」，连续出现说明
+# 这个出口已经被记进风控。此时继续请求只会加深限制、延长恢复时间，所以进入静默期，
+# 期间直接快速失败，不再向上游取址。
+_BK_SOFT_LIMIT ={'fails':0 ,'until':0.0 ,'last':0.0 ,'level':0 }
+# 静默期逐级加长：上游对这种限制不是几秒就解除的，固定 3 分钟只会在
+# 每次到期后立刻再撞一次，等于持续提醒对方「这个出口还在刷」，恢复被拖得更久。
+_BK_SOFT_WINDOWS =(180.0 ,600.0 ,1800.0 )
+def _bk_soft_limited ():
+    return time .time ()<_BK_SOFT_LIMIT ['until']
+def _bk_soft_limit_left ():
+    return max (0 ,int (_BK_SOFT_LIMIT ['until']-time .time ()))
+def _bk_soft_limit_blocked ():
+    # 供上层判断「当前是出口被限制」而不是频道本身不可用
+    return _bk_soft_limited ()
+def _bk_note_soft_limit ():
+    now =time .time ()
+    if now <_BK_SOFT_LIMIT ['until']:
+        return 
+    # 计数带时间窗：距上次失败超过 2 分钟就重新计，避免偶发 403 累积成误判；
+    # 成功回退其它通道不清零，否则「失败一次、回退成功」会永远攒不够阈值。
+    if now -_BK_SOFT_LIMIT ['last']>120.0 :
+        _BK_SOFT_LIMIT ['fails']=0 
+    _BK_SOFT_LIMIT ['last']=now 
+    _BK_SOFT_LIMIT ['fails']=_BK_SOFT_LIMIT ['fails']+1 
+    if _BK_SOFT_LIMIT ['fails']>=3 :
+        _BK_SOFT_LIMIT ['fails']=0 
+        lvl =min (_BK_SOFT_LIMIT ['level'],len (_BK_SOFT_WINDOWS )-1 )
+        wait =_BK_SOFT_WINDOWS [lvl ]
+        _BK_SOFT_LIMIT ['level']=lvl +1 
+        _BK_SOFT_LIMIT ['until']=now +wait 
+        log ('[网络] 上游连续返回不可用地址，静默 %d 分钟，暂停取址以免加深限制'%(int (wait /60 )),min_interval =30.0 )
+def _bk_clear_soft_limit ():
+    # 仅在真正取到可用播放列表时调用：计数交给时间窗自然衰减，
+    # 但退避层级要归零——已经恢复了，下一次失败应从最短静默重新开始。
+    _BK_SOFT_LIMIT ['last']=time .time ()
+    _BK_SOFT_LIMIT ['level']=0 
 def _bk_sign_gate ():
     with _BK_SIGN_LOCK :
         gap =_BK_SIGN_MIN_GAP -(time .time ()-_BK_SIGN_LAST [0 ])
@@ -2602,7 +2641,12 @@ def _bk_diag_get (name ,default =None ):
 # 取址（bkliveinfo）走哪条 TLS 栈：'py' = Python OpenSSL，'java' = 系统 OkHttp。
 # 两者 TLS 指纹不同，CDN 反爬可能对脚本指纹「不报错、只发无效地址」，需要实测定案。
 BK_SIGN_VIA ='py'
+# 取址实际使用的地址族（'4'/'6'/''=自动）。拉取必须与取址同族，
+# 上游会把播放签权绑定到取址源地址族，错配必 403。默认 IPv4，兼容性最好。
+_BK_SIGN_FAMILY =['4']
 def bk_playurls (channel_id ,live_pid ,defn ='fhd',via =None ,family =''):
+    if _bk_soft_limited ():
+        raise YsptpError (f'上游限流静默期，{_bk_soft_limit_left ()} 秒后再试')
     _bk_sign_gate ()
     t =_ckey (channel_id )
     q =urllib .parse .urlencode ({'atime':'120','livepid':live_pid ,'cnlid':channel_id ,'appVer':_CK_APPVER ,'app_version':'300090','caplv':'1','cmd':'2','defn':defn ,'device':'iPhone','encryptVer':'4.2','getpreviewinfo':'0','hevclv':'0','lang':'zh-Hans_CN','livequeue':'0','logintype':'1','nettype':'1','newnettype':'1','newplatform':str (_CK_PLATFORM ),'platform':str (_CK_PLATFORM ),'sdtfrom':'v3021','spacode':'23','spaudio':'1','spdemuxer':'6','spdrm':'2','spdynamicrange':'1','spflv':'1','spflvaudio':'1','sphdrfps':'60','sphttps':'1','spvcode':_BK_H264 ,'spvideo':'4','stream':'1','system':'1','sysver':'ios18.2.1','uhd_flag':'0','cKey':t ['cKey'],'guid':t ['guid'],'fntick':str (t ['ts']),'flowid':t ['flowId'],'playbacktime':'0'})
@@ -2612,22 +2656,42 @@ def bk_playurls (channel_id ,live_pid ,defn ='fhd',via =None ,family =''):
     t0 =time .time ()
     body =None 
     final_url =None 
-    mode =(via or BK_SIGN_VIA or 'py').lower ()
-    # 取址优先走 Python urllib：设备的 Python 走公网 IPv6 出口，实测经 IPv6 取回
-    # 的播放地址才有效（同一时刻经 IPv4 取回的一律 403）。urllib 失败再退回系统栈。
-    if mode !='java':
-        try :
-            req =urllib .request .Request (url ,headers =hdrs )
-            with urllib .request .urlopen (req ,timeout =6 )as r :
-                body =r .read ().decode ()
-                final_url =r .geturl ()
-        except Exception :
-            body =None 
-    if body is None and _java_http () is not None :
-        try :
-            body ,final_url =_java_fetch_text (url ,hdrs ,6.0 ,family )
-        except Exception :
-            body =None 
+    mode =(via or '').lower ()
+    # 地址族一致性：【关键】上游会把播放签权（vkey）绑定到取址请求的源地址族，
+    # 拉取时必须用同一族的源地址，否则一律 403。此前取址走 Python（IPv6 出口）、
+    # 拉取走系统栈（IPv4 出口），两族错配，表现为"取址成功、列表/分片全 403"。
+    # 现在取址优先走系统栈并显式指定族（默认 IPv4），让整条链路同族。
+    fam =family or _BK_SIGN_FAMILY [0 ]
+    if mode =='py':
+        order =['py']
+    elif mode =='java':
+        order =['java']
+    else :
+        order =['java','py']
+    for m in order :
+        if m =='java':
+            if _java_http ()is None :
+                continue 
+            try :
+                body ,final_url =_java_fetch_text (url ,hdrs ,6.0 ,fam )
+            except Exception :
+                body =None 
+            if body :
+                _BK_SIGN_FAMILY [0 ]=fam 
+                break 
+        else :
+            try :
+                req =urllib .request .Request (url ,headers =hdrs )
+                with urllib .request .urlopen (req ,timeout =6 )as r :
+                    body =r .read ().decode ()
+                    final_url =r .geturl ()
+                # urllib 不暴露实际选用的族，拉取端交回自动选择以免错配
+                _BK_SIGN_FAMILY [0 ]=''
+                break 
+            except Exception :
+                body =None 
+    if body is None :
+        raise YsptpError ('取址失败：两条栈均未返回内容')
     if final_url and final_url !=url :
         # 参数被改写会导致服务端签出的地址不可用，必须记录
         try :
@@ -2727,12 +2791,12 @@ def _probe_round (sid ,pid ,defn ,sign_via ,family =''):
         res .append ({'host':url_host (u ),'java':_probe_fetch (u ,'java')['status']})
     rep ['fetch']=res 
     return rep 
-def fetch_abs_playlist (url ,depth =0 ,headers :dict |None =None ,timeout :float =8.0 ):
+def fetch_abs_playlist (url ,depth =0 ,headers :dict |None =None ,timeout :float =8.0 ,family =''):
     # 用 http.client 而非 urllib：bk CDN 的 nginx 会拦截 urllib 请求指纹返回 403，
     # 而 http.client 手动构造的请求头（Host/UA/Accept/Referer）实测可正常 200。
     # 与 /proxy.ts 的转发实现保持一致，手机端无需额外二进制。
     req_headers =dict (headers )if headers else {'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'*/*'}
-    text ,final =_http_fetch_text (url ,req_headers ,timeout )
+    text ,final =_http_fetch_text (url ,req_headers ,timeout ,family =family )
     if depth <2 :
         lines =text .splitlines ()
         for i ,ln in enumerate (lines ):
@@ -2740,7 +2804,7 @@ def fetch_abs_playlist (url ,depth =0 ,headers :dict |None =None ,timeout :float
                 for j in range (i +1 ,len (lines )):
                     s =lines [j ].strip ()
                     if s and (not s .startswith ('#')):
-                        return fetch_abs_playlist (urllib .parse .urljoin (final ,s ),depth +1 ,headers =req_headers ,timeout =timeout )
+                        return fetch_abs_playlist (urllib .parse .urljoin (final ,s ),depth +1 ,headers =req_headers ,timeout =timeout ,family =family )
                 break 
     out =[]
     for ln in text .splitlines ():
@@ -2878,16 +2942,18 @@ def _java_fetch_bytes (url ,headers ,timeout =20.0 ,range_header =None ,method =
         return None 
     return status ,hdrs ,data 
 
-def _http_fetch_text (url ,headers :dict ,timeout :float =8.0 ,max_redirects =3 ):
+def _http_fetch_text (url ,headers :dict ,timeout :float =8.0 ,max_redirects =3 ,family =''):
     """抓文本（m3u8），返回 (text, final_url)。
     Android 上优先系统 HTTP 栈（OkHttp，电视端唯一稳定路径）；桌面/无桥环境用
-    http.client，curl 仅作最后兜底。跟随重定向。"""
+    http.client，curl 仅作最后兜底。跟随重定向。
+    family 用于锁定地址族：上游会把播放签权绑定到取址时的源地址族，
+    取址与拉取必须同族，否则必 403。"""
     if _java_http() is not None:
         # 系统栈可用时优先走它：Python OpenSSL 在盒子上必被 CDN 判脚本 403。
         # 上游明确返回错误码时直接上抛（换栈重试只会加重风控）；
         # 仅当系统栈在网络层就失败（DNS/连接）时，才回落下面的原生实现。
         try:
-            text, final_url = _java_fetch_text(url, dict(headers) if headers else {}, timeout)
+            text, final_url = _java_fetch_text(url, dict(headers) if headers else {}, timeout, family)
         except urllib.error.HTTPError:
             raise
         if text is not None:
@@ -3678,7 +3744,8 @@ def bk_refresh (ch ):
             # HTTP 栈（OkHttp），桌面无桥时才回落 curl/http.client。
             pl =None
             try :
-                pl ,_ =_http_fetch_text (u ,{'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'*/*'},8 )
+                # 拉取沿用取址时用的地址族：上游把签权绑在取址源族上，错配必 403。
+                pl ,_ =_http_fetch_text (u ,{'User-Agent':'qqlive','Referer':'https://live.cctv.cn/','Accept':'*/*'},8 ,family =_BK_SIGN_FAMILY [0 ])
             except Exception as e :
                 last_err ='fetch: %s'%str (e )[:50 ]
                 # 播放地址有效期只有约 10 秒，打印地址年龄便于判断是不是"取址太慢导致过期"
@@ -4464,7 +4531,10 @@ class Handler (BaseHTTPRequestHandler ):
             # 用户重试时往往已经出界，于是又白白等满一次冷拉超时。
             if now_ts -getattr (ch ,'last_fail_time',0 )<60.0 and ('403'in (ch .last_error or '')or '503'in (ch .last_error or '')):
                 trigger_background_refresh (ch )
-                self ._send (503 ,'频道 %s 上游暂时拒绝 (%s)，请稍后重试或换台\n'%(ch .name ,ch .last_error [:60 ]),head_only =head_only )
+                if '403'in (ch .last_error or ''):
+                    self ._send (503 ,'频道 %s 暂不可用：当前网络出口被上游限制，央视/4K 频道不受影响，请稍后重试\n'%ch .name ,head_only =head_only )
+                else :
+                    self ._send (503 ,'频道 %s 上游暂时拒绝 (%s)，请稍后重试或换台\n'%(ch .name ,ch .last_error [:60 ]),head_only =head_only )
                 return 
             ch .register_client (self .connection )
             try :
@@ -4490,7 +4560,10 @@ class Handler (BaseHTTPRequestHandler ):
             ch .last_fail_time =time .time ()
             if not ch .last_error :
                 ch .last_error ='上游未返回可用播放列表'
-            self ._send (503 ,'频道 %s 源暂时不可用 (%s)，请稍后重试或换台\n'%(ch .name ,ch .last_error or '拉取中'),head_only =head_only )
+            if '403'in (ch .last_error or ''):
+                self ._send (503 ,'频道 %s 暂不可用：当前网络出口被上游限制，央视/4K 频道不受影响，请稍后重试\n'%ch .name ,head_only =head_only )
+            else :
+                self ._send (503 ,'频道 %s 源暂时不可用 (%s)，请稍后重试或换台\n'%(ch .name ,ch .last_error or '拉取中'),head_only =head_only )
             return 
         self ._send (404 ,'not found\n',head_only =head_only )
 def init_resolver ():
