@@ -94,8 +94,8 @@ jobs:
 
           **APK 包说明**（均为 release 签名，可直接覆盖升级）
           - `app-universal-release.apk`：通用包（含 32/64 位），推荐
-          - `app-arm64-v8a-release.apk`：64 位（新电视/手机）
-          - `app-armeabi-v7a-release.apk`：32 位（老电视/盒子）
+          - `app-arm64-v8a-release.apk`：64 位设备
+          - `app-armeabi-v7a-release.apk`：32 位设备
           EOF
 
       - name: Upload APK artifacts
